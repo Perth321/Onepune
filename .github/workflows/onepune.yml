@@ -1,1 +1,31 @@
-name: Onepune 24/7\n\non:\n  workflow_dispatch:\n  schedule:\n    - cron: \"0 */6 * * *\"\n\nconcurrency:\n  group: onepune-24-7\n  cancel-in-progress: true\n\npermissions:\n  contents: write\n  actions: write\n\njobs:\n  bot:\n    runs-on: ubuntu-latest\n    timeout-minutes: 355\n    env:\n      DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}\n      GITHUB_TOKEN: ${{ github.token }}\n      GITHUB_REPOSITORY: ${{ github.repository }}\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 20\n          cache: npm\n      - run: npm install --no-audit --no-fund\n      - run: node src/index.js\n
+name: Onepune 24/7
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+concurrency:
+  group: onepune-24-7
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+      GITHUB_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      - run: node src/index.js
