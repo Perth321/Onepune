@@ -1,4 +1,18 @@
-import { Client, GatewayIntentBits } from "discord.js";
+import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ChannelSelectMenuBuilder,
+  ChannelType,
+  Client,
+  EmbedBuilder,
+  GatewayIntentBits,
+  ModalBuilder,
+  PermissionFlagsBits,
+  SlashCommandBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+} from "discord.js";
 
 const token = process.env.DISCORD_BOT_TOKEN;
 const githubToken = process.env.GITHUB_TOKEN;
@@ -7,6 +21,11 @@ const schedulePath = "data/schedules.json";
 const BANGKOK_OFFSET_MS = 7 * 60 * 60 * 1000;
 const schedules = [];
 let saveQueue = Promise.resolve();
+const onepuneCommand = new SlashCommandBuilder()
+  .setName("onepune")
+  .setDescription("เปิดแผงควบคุมเช็กชื่อวันเพื่อน")
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild.toString());
+const onepuneCommandData = onepuneCommand.toJSON();
 
 if (!token) {
   console.error("DISCORD_BOT_TOKEN is not set");
@@ -108,6 +127,14 @@ function parseTime(hourText, minuteText, unitText) {
   return { hour, minute };
 }
 
+function parseTimeInput(text) {
+  const match = text.match(
+    /^(\d{1,2})(?::(\d{2}))?\s*(ทุ่ม|โมงเย็น|โมงค่ำ|โมง|นาฬิกา|am|pm)?$/iu,
+  );
+  if (!match) return null;
+  return parseTime(match[1], match[2], match[3]);
+}
+
 function parseScheduleCommand(message) {
   const text = textWithoutBotMention(message.content);
   const match = text.match(
@@ -155,6 +182,193 @@ function thaiTime(date) {
     dateStyle: "long",
     timeStyle: "short",
   });
+}
+
+function scheduleForGuild(guildId) {
+  return schedules.find((item) => item.guildId === guildId);
+}
+
+function scheduleSummary(guildId) {
+  const schedule = scheduleForGuild(guildId);
+  if (!schedule) return "ยังไม่มีนัดหมายสำหรับเซิร์ฟเวอร์นี้";
+
+  return (
+    "นัดหมายถัดไป: **" +
+    thaiTime(new Date(schedule.targetAt)) +
+    "**\nช่องแจ้งผล: <#" +
+    (schedule.notifyChannelId || schedule.channelId) +
+    ">"
+  );
+}
+
+function panelEmbed(guild) {
+  return new EmbedBuilder()
+    .setColor(0x6d5dfc)
+    .setTitle("Onepune")
+    .setDescription(
+      "แผงควบคุมเช็กชื่อสมาชิกในห้องเสียงของ **" +
+        guild.name +
+        "**\n\n" +
+        scheduleSummary(guild.id) +
+        "\n\nเลือกการทำงานจากปุ่มด้านล่างได้เลย",
+    )
+    .setFooter({ text: "เลือกช่องใหม่ได้จากรายการล่าสุดของเซิร์ฟเวอร์ทุกครั้ง" });
+}
+
+function panelButtons(userId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("onepune:set:" + userId)
+      .setLabel("ตั้งเวลา")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId("onepune:status:" + userId)
+      .setLabel("ดูสถานะ")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId("onepune:cancel:" + userId)
+      .setLabel("ยกเลิกนัดหมาย")
+      .setStyle(ButtonStyle.Danger),
+  );
+}
+
+async function registerCommandForGuild(guild) {
+  try {
+    const existingCommands = await guild.commands.fetch();
+    const existing = existingCommands.find((command) => command.name === "onepune");
+
+    if (existing) {
+      await guild.commands.edit(existing.id, onepuneCommandData);
+    } else {
+      await guild.commands.create(onepuneCommandData);
+    }
+  } catch (error) {
+    console.error("Could not register /onepune in " + guild.name + ":", error.message);
+  }
+}
+
+async function showPanel(interaction) {
+  await interaction.reply({
+    embeds: [panelEmbed(interaction.guild)],
+    components: [panelButtons(interaction.user.id)],
+    ephemeral: true,
+  });
+}
+
+async function handleInteraction(interaction) {
+  if (interaction.isChatInputCommand() && interaction.commandName === "onepune") {
+    return showPanel(interaction);
+  }
+
+  if (!interaction.guild) return;
+
+  if (interaction.isButton()) {
+    const [prefix, action, userId] = interaction.customId.split(":");
+    if (prefix !== "onepune") return;
+
+    if (userId !== interaction.user.id) {
+      return interaction.reply({
+        content: "แผงนี้เปิดโดยผู้ใช้อื่น ให้พิมพ์ `/onepune` เพื่อเปิดแผงของคุณเองครับ",
+        ephemeral: true,
+      });
+    }
+
+    if (action === "set") {
+      const modal = new ModalBuilder()
+        .setCustomId("onepune:time:" + interaction.user.id)
+        .setTitle("ตั้งเวลาเช็กชื่อ");
+      const timeInput = new TextInputBuilder()
+        .setCustomId("time")
+        .setLabel("เวลาไทย เช่น 22:30 หรือ 4 ทุ่ม")
+        .setPlaceholder("22:30")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(20);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(timeInput));
+      return interaction.showModal(modal);
+    }
+
+    if (action === "status") {
+      return interaction.reply({ content: scheduleSummary(interaction.guild.id), ephemeral: true });
+    }
+
+    if (action === "cancel") {
+      const current = scheduleForGuild(interaction.guild.id);
+      if (!current) {
+        return interaction.reply({ content: "เซิร์ฟเวอร์นี้ยังไม่มีนัดหมายครับ", ephemeral: true });
+      }
+
+      removeSchedule(current);
+      await saveSchedules();
+      return interaction.reply({ content: "ยกเลิกนัดหมายของเซิร์ฟเวอร์นี้แล้วครับ", ephemeral: true });
+    }
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("onepune:time:")) {
+    const userId = interaction.customId.split(":")[2];
+    if (userId !== interaction.user.id) return;
+
+    const timeText = interaction.fields.getTextInputValue("time").trim();
+    const time = parseTimeInput(timeText);
+    if (!time) {
+      return interaction.reply({
+        content: "เวลายังไม่ถูกต้องครับ ลองใช้รูปแบบ `22:30` หรือ `4 ทุ่ม`",
+        ephemeral: true,
+      });
+    }
+
+    await interaction.guild.channels.fetch().catch(() => null);
+    const channelMenu = new ChannelSelectMenuBuilder()
+      .setCustomId("onepune:channel:" + userId + ":" + time.hour + ":" + time.minute)
+      .setPlaceholder("เลือกช่องแจ้งผล")
+      .setMinValues(1)
+      .setMaxValues(1)
+      .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement);
+
+    return interaction.reply({
+      content:
+        "เวลา **" +
+        String(time.hour).padStart(2, "0") +
+        ":" +
+        String(time.minute).padStart(2, "0") +
+        " น.**\nเลือกช่องแจ้งผลจากรายการด้านล่างได้เลยครับ รายการนี้จะใช้ช่องล่าสุดของเซิร์ฟเวอร์",
+      components: [new ActionRowBuilder().addComponents(channelMenu)],
+      ephemeral: true,
+    });
+  }
+
+  if (interaction.isChannelSelectMenu() && interaction.customId.startsWith("onepune:channel:")) {
+    const [, , userId, hourText, minuteText] = interaction.customId.split(":");
+    if (userId !== interaction.user.id) {
+      return interaction.reply({ content: "เมนูนี้เปิดโดยผู้ใช้อื่นครับ", ephemeral: true });
+    }
+
+    const notifyChannel = interaction.guild.channels.cache.get(interaction.values[0]);
+    if (!notifyChannel || !notifyChannel.isTextBased()) {
+      return interaction.reply({ content: "ช่องนี้ไม่ใช่ช่องข้อความที่ใช้ส่งรายงานได้ครับ", ephemeral: true });
+    }
+
+    const target = nextTime(Number(hourText), Number(minuteText));
+    const current = scheduleForGuild(interaction.guild.id);
+    if (current) removeSchedule(current);
+    schedules.push({
+      guildId: interaction.guild.id,
+      notifyChannelId: notifyChannel.id,
+      targetAt: target.toISOString(),
+    });
+    await saveSchedules();
+
+    return interaction.update({
+      content:
+        "ตั้งนัดหมายเรียบร้อยครับ\nเช็กชื่อเวลา **" +
+        thaiTime(target) +
+        "** และส่งผลที่ <#" +
+        notifyChannel.id +
+        ">",
+      components: [],
+    });
+  }
 }
 
 function chunks(text) {
@@ -245,11 +459,18 @@ async function processSchedules() {
 
 client.once("ready", async (readyClient) => {
   console.log("Logged in as " + readyClient.user.tag);
+  for (const guild of readyClient.guilds.cache.values()) {
+    await registerCommandForGuild(guild);
+  }
   await loadSchedules().catch((error) => console.error(error.message));
   setInterval(() => processSchedules().catch((error) => console.error(error.message)), 10000);
   await processSchedules();
 });
 
+client.on("guildCreate", (guild) => registerCommandForGuild(guild));
+client.on("interactionCreate", (interaction) =>
+  handleInteraction(interaction).catch((error) => console.error("Interaction failed:", error.message)),
+);
 client.on("messageCreate", (message) => onMessage(message).catch((error) => console.error(error.message)));
 client.on("error", (error) => console.error("Discord error:", error.message));
 client.login(token);
