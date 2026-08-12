@@ -28,5 +28,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install --no-audit --no-fund
+      - name: Install dependencies
+        run: |
+          for attempt in 1 2 3; do
+            npm ci --no-audit --no-fund && exit 0
+            echo "npm ci failed on attempt ${attempt}; retrying..."
+            sleep 5
+          done
+          exit 1
       - run: node src/index.js
