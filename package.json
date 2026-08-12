@@ -1,0 +1,1 @@
+{\n  \"name\": \"onepune\",\n  \"version\": \"1.0.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": { \"start\": \"node src/index.js\" },\n  \"dependencies\": { \"discord.js\": \"^14.21.0\" }\n}\n
