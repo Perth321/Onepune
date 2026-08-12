@@ -32,7 +32,7 @@ jobs:
         run: |
           for attempt in 1 2 3; do
             if npm install --no-audit --no-fund --registry=https://registry.npmjs.org; then
-              test -f node_modules/discord.js/index.js && exit 0
+              node --input-type=module -e "import('discord.js')" && exit 0
             fi
             echo "npm install failed on attempt ${attempt}; retrying..."
             rm -rf node_modules
