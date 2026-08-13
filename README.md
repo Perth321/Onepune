@@ -60,7 +60,7 @@
 - เสียงที่รับจะถูกส่งไป OpenRouter เพื่อถอดเสียง จึงควรแจ้งสมาชิกและขอความยินยอมตามกฎของเซิร์ฟเวอร์
 - ตั้ง `VOICE_COMMANDS_ENABLED=false` เพื่อปิดการเข้าห้องและรับเสียงทั้งหมด
 - หากเพิ่ม Secret `DEEPGRAM_API_KEY` บอทจะใช้ Deepgram `nova-3` ภาษาไทยแบบเดียวกับ Guard; ตั้ง `DEEPGRAM_MODEL` และ `DEEPGRAM_LANGUAGE` เพื่อเปลี่ยนได้
-- หากไม่มี Deepgram Secret จะ fallback ไป OpenRouter โดยใช้ `OPENROUTER_STT_MODEL` ค่าเริ่มต้น `openai/whisper-large-v3` ทั้งสองบริการอาจคิดค่าใช้จ่ายตามระยะเวลาเสียง
+- หากไม่มี `DEEPGRAM_API_KEY` บอทจะไม่ส่งเสียงไปถอดและไม่แจ้งเตือนซ้ำใน Discord เหมือนพฤติกรรมของ Guard
 
 โมเดลฟรีมี rate limit ต่ำ เหมาะกับการทดลองหรือเซิร์ฟเวอร์ที่ข้อความไม่มาก หากใช้งานจริงควรตั้ง `OPENROUTER_MODEL` เป็นโมเดลแบบเสียเงินที่ต้องการ
 

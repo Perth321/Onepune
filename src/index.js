@@ -39,7 +39,7 @@ const voiceCommandsEnabled = process.env.VOICE_COMMANDS_ENABLED !== "false";
 const BANGKOK_OFFSET_MS = 7 * 60 * 60 * 1000;
 const schedules = [];
 const ai = createOpenRouterClient();
-const transcribeVoice = createVoiceTranscriber({ fallback: (wavBuffer) => ai.transcribe(wavBuffer) });
+const transcribeVoice = createVoiceTranscriber();
 const conversationHistory = new Map();
 const aiCooldowns = new Map();
 const pendingAgentActions = new Map();

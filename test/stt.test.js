@@ -3,19 +3,20 @@ import test from "node:test";
 
 import { createVoiceTranscriber } from "../src/stt.js";
 
-test("uses the fallback transcriber when Deepgram is not configured", async () => {
+test("stays silent without calling another provider when Deepgram is not configured", async () => {
   const wav = Buffer.from("wav-data");
-  let received;
+  let requested = false;
   const transcribe = createVoiceTranscriber({
     apiKey: "",
-    fallback: async (buffer) => {
-      received = buffer;
-      return "วันเพื่อน";
+    fetchImpl: async () => {
+      requested = true;
+      throw new Error("should not be called");
     },
   });
 
-  assert.equal(await transcribe(wav), "วันเพื่อน");
-  assert.equal(received, wav);
+  assert.equal(await transcribe(wav), "");
+  assert.equal(transcribe.available, false);
+  assert.equal(requested, false);
 });
 
 test("sends WAV audio to Deepgram when its key is configured", async () => {
@@ -35,6 +36,7 @@ test("sends WAV audio to Deepgram when its key is configured", async () => {
   });
 
   assert.equal(await transcribe(wav), "วันเพื่อน ค้นข่าว");
+  assert.equal(transcribe.available, true);
   assert.match(captured.url, /model=nova-3&language=th/u);
   assert.equal(captured.options.headers.Authorization, "Token deepgram-test-secret");
   assert.equal(captured.options.body, wav);

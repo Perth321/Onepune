@@ -4,13 +4,11 @@ export function createVoiceTranscriber({
   apiKey = process.env.DEEPGRAM_API_KEY,
   model = process.env.DEEPGRAM_MODEL || "nova-3",
   language = process.env.DEEPGRAM_LANGUAGE || "th",
-  fallback,
   fetchImpl = fetch,
 } = {}) {
-  return async function transcribe(wavBuffer) {
+  async function transcribe(wavBuffer) {
     if (!apiKey) {
-      if (!fallback) throw new Error("No speech-to-text provider is configured");
-      return fallback(wavBuffer);
+      return "";
     }
 
     const controller = new AbortController();
@@ -38,5 +36,11 @@ export function createVoiceTranscriber({
     } finally {
       clearTimeout(timer);
     }
-  };
+  }
+
+  transcribe.available = Boolean(apiKey);
+  transcribe.engine = "deepgram";
+  transcribe.model = model;
+  transcribe.language = language;
+  return transcribe;
 }

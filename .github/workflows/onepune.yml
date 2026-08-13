@@ -45,7 +45,6 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL || 'openrouter/free' }}
           OPENROUTER_FALLBACK_MODELS: ${{ vars.OPENROUTER_FALLBACK_MODELS || 'google/gemma-4-26b-a4b-it:free,openai/gpt-oss-20b:free,liquid/lfm-2.5-2.6b:free' }}
-          OPENROUTER_STT_MODEL: ${{ vars.OPENROUTER_STT_MODEL || 'openai/whisper-large-v3' }}
           AUTO_TRANSLATE_ENABLED: ${{ vars.AUTO_TRANSLATE_ENABLED || 'true' }}
           VOICE_COMMANDS_ENABLED: ${{ vars.VOICE_COMMANDS_ENABLED || 'true' }}
           GITHUB_TOKEN: ${{ github.token }}

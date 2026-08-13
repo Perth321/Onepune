@@ -1,7 +1,5 @@
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const OPENROUTER_TRANSCRIPTION_URL = "https://openrouter.ai/api/v1/audio/transcriptions";
 const DEFAULT_MODEL = "openrouter/free";
-const DEFAULT_STT_MODEL = "openai/whisper-large-v3";
 const DEFAULT_FALLBACK_MODELS = [
   "google/gemma-4-26b-a4b-it:free",
   "openai/gpt-oss-20b:free",
@@ -105,7 +103,6 @@ export function cleanAssistantReply(content) {
 export function createOpenRouterClient({
   apiKey = process.env.OPENROUTER_API_KEY,
   model = process.env.OPENROUTER_MODEL || DEFAULT_MODEL,
-  sttModel = process.env.OPENROUTER_STT_MODEL || DEFAULT_STT_MODEL,
   fallbackModels = process.env.OPENROUTER_FALLBACK_MODELS
     ? process.env.OPENROUTER_FALLBACK_MODELS.split(",").map((item) => item.trim()).filter(Boolean)
     : DEFAULT_FALLBACK_MODELS,
@@ -299,47 +296,5 @@ export function createOpenRouterClient({
     throw new Error("OpenRouter exceeded the server tool round limit");
   }
 
-  async function transcribe(wavBuffer) {
-    if (!apiKey) throw new Error("OPENROUTER_API_KEY is not set");
-    if (!Buffer.isBuffer(wavBuffer) || wavBuffer.length <= 44) {
-      throw new Error("Audio recording is empty");
-    }
-
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      const response = await fetchImpl(OPENROUTER_TRANSCRIPTION_URL, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": "https://github.com/Perth321/Onepune",
-          "X-OpenRouter-Title": "Onepune Discord Bot",
-        },
-        body: JSON.stringify({
-          model: sttModel,
-          input_audio: { data: wavBuffer.toString("base64"), format: "wav" },
-          temperature: 0,
-        }),
-      });
-      if (response.ok) {
-        const body = await response.json();
-        if (typeof body.text !== "string") throw new Error("OpenRouter returned an invalid transcript");
-        return body.text.trim();
-      }
-
-      const retryAfter = Number(response.headers.get("retry-after"));
-      if ([429, 502, 503].includes(response.status) && attempt === 1) {
-        const delay = Number.isFinite(retryAfter) && retryAfter > 0
-          ? Math.min(retryAfter * 1000, 5000)
-          : 750;
-        await wait(delay);
-        continue;
-      }
-      throw new OpenRouterError(`OpenRouter transcription failed (${response.status})`, {
-        status: response.status,
-        retryAfter,
-      });
-    }
-  }
-
-  return { chat, transcribe, translate };
+  return { chat, translate };
 }

@@ -201,7 +201,6 @@ export function createVoiceController({ client, transcribe, onTranscript, enable
   const wakeTracker = createVoiceWakeTracker();
   const busyGuilds = new Set();
   const syncingGuilds = new Set();
-  const errorNoticeAt = new Map();
   const transcriptionPausedUntil = new Map();
   const transcriptionDisabledGuilds = new Set();
   const lastPacketAt = new Map();
@@ -234,19 +233,6 @@ export function createVoiceController({ client, transcribe, onTranscript, enable
     subscription.unsubscribe();
   }
 
-  async function notifyTranscriptionError(guild, voiceChannel, error) {
-    if (![401, 402, 403, 429].includes(error.status) || errorNoticeAt.has(guild.id)) return;
-    errorNoticeAt.set(guild.id, Date.now());
-    const channel = responseChannel(guild, voiceChannel);
-    await channel?.send({
-      content:
-        error.status === 402
-          ? "🎙️ เครดิตสำหรับถอดเสียงไม่พอ จึงพักรับคำสั่งเสียงชั่วคราว"
-          : "🎙️ ระบบถอดเสียงใช้งานไม่ได้ชั่วคราว กรุณาตรวจคีย์หรือโควตา",
-      allowedMentions: { parse: [] },
-    }).catch(() => null);
-  }
-
   async function handleTranscript({ guild, voiceChannel, userId, pcm }) {
     if (transcriptionDisabledGuilds.has(guild.id)) return;
     if ((transcriptionPausedUntil.get(guild.id) || 0) > Date.now()) return;
@@ -262,7 +248,6 @@ export function createVoiceController({ client, transcribe, onTranscript, enable
       if (failureMode === "pause-five-minutes") {
         transcriptionPausedUntil.set(guild.id, Date.now() + 5 * 60_000);
       }
-      await notifyTranscriptionError(guild, voiceChannel, error);
       return;
     }
     if (!text) return;
