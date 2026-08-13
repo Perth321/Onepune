@@ -1,4 +1,5 @@
 import { Readable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import {
   AudioPlayerStatus,
   EndBehaviorType,
@@ -26,6 +27,7 @@ const WATCHDOG_MS = 60_000;
 const WATCHDOG_COOLDOWN_MS = 3 * 60_000;
 const MAX_QUEUE = 32;
 const MAX_CONCURRENT_TRANSCRIPTIONS = 4;
+const GUARD_GREETING_PATH = fileURLToPath(new URL("../assets/greeting.mp3", import.meta.url));
 
 const WAKE_TOKEN_RE =
   /(?:วันเพื่อนๆ|วัน\s*เพื่อน|วันเพิ่อน|วันเพื้อน|วันเพือน|one\s*friend|wan\s*puean|wan\s*phuean)/iu;
@@ -148,9 +150,13 @@ function generateTone(segments, gain = 0.5) {
 }
 
 const JOIN_BEEP = generateTone([
-  { frequency: 880, ms: 180 },
-  { frequency: 0, ms: 80 },
-  { frequency: 1100, ms: 220 },
+  { frequency: 0, ms: 200 },
+  { frequency: 880, ms: 280 },
+  { frequency: 0, ms: 120 },
+  { frequency: 660, ms: 320 },
+  { frequency: 0, ms: 100 },
+  { frequency: 1100, ms: 380 },
+  { frequency: 0, ms: 400 },
 ]);
 const WAKE_BEEP = generateTone([
   { frequency: 1400, ms: 110 },
@@ -227,6 +233,33 @@ export function createVoiceController({ client, transcribe, onTranscript, enable
       });
     });
     subscription.unsubscribe();
+  }
+
+  async function playGuardGreeting(connection) {
+    if (!connection || connection.state.status === VoiceConnectionStatus.Destroyed) return false;
+    const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
+    const resource = createAudioResource(GUARD_GREETING_PATH, {
+      inputType: StreamType.Arbitrary,
+      silencePaddingFrames: 5,
+    });
+    const subscription = connection.subscribe(player);
+    if (!subscription) return false;
+    player.play(resource);
+    const played = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), 20_000);
+      timer.unref();
+      player.once(AudioPlayerStatus.Idle, () => {
+        clearTimeout(timer);
+        resolve(resource.playbackDuration >= 100);
+      });
+      player.once("error", (error) => {
+        console.error("Guard greeting failed:", error.message);
+        clearTimeout(timer);
+        resolve(false);
+      });
+    });
+    subscription.unsubscribe();
+    return played;
   }
 
   async function notifyTranscriptionError(guild, voiceChannel, error) {
@@ -419,7 +452,8 @@ export function createVoiceController({ client, transcribe, onTranscript, enable
       lastPacketAt.set(guild.id, Date.now());
       if (!announcedConnections.has(connection)) {
         announcedConnections.add(connection);
-        await playBeep(connection, JOIN_BEEP, "join beep");
+        const greeted = await playGuardGreeting(connection).catch(() => false);
+        if (!greeted) await playBeep(connection, JOIN_BEEP, "join beep");
         await responseChannel(guild, voiceChannel)?.send({
           content:
             `🎙️ เข้าห้อง **${voiceChannel.name}** แล้ว พูด **วันเพื่อน** แล้วตามด้วยคำสั่ง ` +
