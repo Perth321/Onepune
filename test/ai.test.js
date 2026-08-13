@@ -33,7 +33,7 @@ test("sends translation requests without exposing the key in the body", async ()
     fetchImpl: async (url, options) => {
       captured = { url, options };
       return new Response(
-        JSON.stringify({ choices: [{ message: { content: "Hello" } }] }),
+        JSON.stringify({ choices: [{ message: { content: '{"translation":"Hello"}' } }] }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
     },
@@ -43,4 +43,8 @@ test("sends translation requests without exposing the key in the body", async ()
   assert.equal(captured.url, "https://openrouter.ai/api/v1/chat/completions");
   assert.equal(captured.options.headers.Authorization, "Bearer test-secret");
   assert.equal(captured.options.body.includes("test-secret"), false);
+  const requestBody = JSON.parse(captured.options.body);
+  assert.equal(requestBody.response_format.type, "json_schema");
+  assert.equal(requestBody.provider.require_parameters, true);
+  assert.match(requestBody.messages[0].content, /never a question for you to answer/u);
 });
