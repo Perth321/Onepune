@@ -5,6 +5,7 @@ import {
   createOpenRouterClient,
   detectTranslationDirection,
   isAssistantInvocation,
+  openRouterWebSearchTool,
   removeAssistantInvocation,
 } from "../src/ai.js";
 
@@ -110,4 +111,34 @@ test("runs a server tool and returns the final agent response", async () => {
   assert.match(response, /42/u);
   assert.equal(requests[0].parallel_tool_calls, false);
   assert.equal(requests[1].messages.at(-1).role, "tool");
+});
+
+test("passes OpenRouter web search server tool and appends URL citations", async () => {
+  let requestBody;
+  const client = createOpenRouterClient({
+    apiKey: "test-secret",
+    model: "test/model",
+    fetchImpl: async (_url, options) => {
+      requestBody = JSON.parse(options.body);
+      return new Response(
+        JSON.stringify({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: "เจอข้อมูลล่าสุดแล้ว",
+              annotations: [{
+                type: "url_citation",
+                url_citation: { url: "https://example.com/news", title: "Example News" },
+              }],
+            },
+          }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    },
+  });
+
+  const response = await client.chat([], "ค้นข่าวล่าสุด", { tools: [openRouterWebSearchTool] });
+  assert.equal(requestBody.tools[0].type, "openrouter:web_search");
+  assert.match(response, /\[Example News\]\(https:\/\/example\.com\/news\)/u);
 });

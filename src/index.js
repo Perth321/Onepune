@@ -18,6 +18,7 @@ import {
   createOpenRouterClient,
   detectTranslationDirection,
   isAssistantInvocation,
+  openRouterWebSearchTool,
   removeAssistantInvocation,
 } from "./ai.js";
 import { createServerToolExecutor, executeServerAction, serverTools } from "./server-tools.js";
@@ -297,6 +298,12 @@ function confirmationSummary(action) {
   if (action.name === "timeout_member") {
     return `พักการใช้งาน <@${action.args.memberId}> เป็นเวลา **${action.args.minutes} นาที**`;
   }
+  if (action.name === "set_server_mute") {
+    return `${action.args.enabled ? "ปิด" : "เปิด"}ไมค์เซิร์ฟเวอร์ของ <@${action.args.memberId}>`;
+  }
+  if (action.name === "set_server_deaf") {
+    return `${action.args.enabled ? "ปิด" : "เปิด"}เสียงที่ได้ยินของ <@${action.args.memberId}>`;
+  }
   return "ทำรายการจัดการเซิร์ฟเวอร์";
 }
 
@@ -522,13 +529,14 @@ async function handleAssistantChat(message) {
 
   await replyWithAi(message, async () => {
     let pendingAction = null;
-    const queueAction = ({ name, args, permission }) => {
+    const queueAction = ({ name, args, permission, adminOnly = false }) => {
       if (pendingAction) throw new Error("Only one server change can be confirmed at a time");
       const action = {
         id: randomUUID().replaceAll("-", "").slice(0, 12),
         name,
         args,
         permission,
+        adminOnly,
         userId: message.author.id,
         guildId: message.guild.id,
         expiresAt: Date.now() + AGENT_ACTION_TTL_MS,
@@ -538,13 +546,20 @@ async function handleAssistantChat(message) {
       return action;
     };
     const executeTool = createServerToolExecutor({ message, queueAction });
-    const needsServerTools = /(เซิร์ฟ|เซิฟ|ช่อง|ห้อง|ยศ|สมาชิก|สโลว์|ไทม์เอาต์|server|channel|role|member|slowmode|timeout)/iu.test(
+    const needsServerTools = /(เซิร์ฟ|เซิฟ|ช่อง|ห้อง|ยศ|สมาชิก|ไมค์|หูฟัง|ปิดเสียง|สโลว์|ไทม์เอาต์|server|channel|role|member|mute|deaf|slowmode|timeout)/iu.test(
       prompt,
     );
+    const needsWebSearch = /(ค้น|เสิร์ช|เว็บ|เว็บไซต์|ข่าว|ล่าสุด|search|website|web|news|latest|look\s*up)/iu.test(
+      prompt,
+    );
+    const tools = [
+      ...(needsServerTools ? serverTools : []),
+      ...(needsWebSearch ? [openRouterWebSearchTool] : []),
+    ];
     let response;
     try {
       response = await ai.chat(history, prompt, {
-        tools: needsServerTools ? serverTools : [],
+        tools,
         executeTool,
       });
     } catch (error) {

@@ -65,6 +65,26 @@ export const serverTools = [
     },
     ["member_id", "minutes"],
   ),
+  tool(
+    "set_server_mute",
+    "Queue server-muting or unmuting a voice member. Only the server owner or an Administrator may request this, and confirmation is required.",
+    {
+      member_id: { type: "string", pattern: "^[0-9]{15,22}$" },
+      enabled: { type: "boolean", description: "true to server-mute; false to unmute" },
+      reason: { type: "string", maxLength: 200 },
+    },
+    ["member_id", "enabled"],
+  ),
+  tool(
+    "set_server_deaf",
+    "Queue server-deafening or undeafening a voice member. Only the server owner or an Administrator may request this, and confirmation is required.",
+    {
+      member_id: { type: "string", pattern: "^[0-9]{15,22}$" },
+      enabled: { type: "boolean", description: "true to server-deafen; false to undeafen" },
+      reason: { type: "string", maxLength: 200 },
+    },
+    ["member_id", "enabled"],
+  ),
 ];
 
 const mutationPermissions = {
@@ -72,7 +92,11 @@ const mutationPermissions = {
   rename_channel: PermissionFlagsBits.ManageChannels,
   set_slowmode: PermissionFlagsBits.ManageChannels,
   timeout_member: PermissionFlagsBits.ModerateMembers,
+  set_server_mute: PermissionFlagsBits.Administrator,
+  set_server_deaf: PermissionFlagsBits.Administrator,
 };
+
+const adminOnlyMutations = new Set(["set_server_mute", "set_server_deaf"]);
 
 function cleanName(value) {
   return String(value || "").trim().slice(0, 100);
@@ -110,6 +134,17 @@ function validateMutation(name, args) {
       throw new Error("Valid member_id and minutes from 1 to 10080 are required");
     }
     return { memberId, minutes, reason: String(args.reason || "").trim().slice(0, 200) };
+  }
+  if (name === "set_server_mute" || name === "set_server_deaf") {
+    const memberId = snowflake(args.member_id);
+    if (!memberId || typeof args.enabled !== "boolean") {
+      throw new Error("Valid member_id and boolean enabled are required");
+    }
+    return {
+      memberId,
+      enabled: args.enabled,
+      reason: String(args.reason || "").trim().slice(0, 200),
+    };
   }
   throw new Error("Unknown server mutation tool");
 }
@@ -168,11 +203,18 @@ export function createServerToolExecutor({ message, queueAction }) {
 
     const permission = mutationPermissions[name];
     if (!permission) return { ok: false, error: "Unknown tool" };
-    if (!message.member?.permissions.has(permission)) {
+    const adminOnly = adminOnlyMutations.has(name);
+    const isOwnerOrAdmin =
+      guild.ownerId === message.author.id ||
+      message.member?.permissions.has(PermissionFlagsBits.Administrator);
+    if (adminOnly && !isOwnerOrAdmin) {
+      return { ok: false, error: "Only the server owner or an Administrator may use this voice action" };
+    }
+    if (!adminOnly && !message.member?.permissions.has(permission)) {
       return { ok: false, error: "The requesting user does not have the required Discord permission" };
     }
     const validatedArgs = validateMutation(name, args);
-    const queued = queueAction({ name, args: validatedArgs, permission });
+    const queued = queueAction({ name, args: validatedArgs, permission, adminOnly });
     return {
       ok: true,
       status: "awaiting_user_confirmation",
@@ -183,7 +225,13 @@ export function createServerToolExecutor({ message, queueAction }) {
 }
 
 export async function executeServerAction(interaction, action) {
-  if (!interaction.memberPermissions?.has(action.permission)) {
+  const isOwnerOrAdmin =
+    interaction.guild.ownerId === interaction.user.id ||
+    interaction.memberPermissions?.has(PermissionFlagsBits.Administrator);
+  if (action.adminOnly && !isOwnerOrAdmin) {
+    throw new Error("คำสั่งเสียงนี้ใช้ได้เฉพาะเจ้าของเซิร์ฟเวอร์หรือ Administrator");
+  }
+  if (!action.adminOnly && !interaction.memberPermissions?.has(action.permission)) {
     throw new Error("คุณไม่มีสิทธิ์ Discord ที่จำเป็นสำหรับคำสั่งนี้แล้ว");
   }
 
@@ -220,6 +268,19 @@ export async function executeServerAction(interaction, action) {
     if (!member.moderatable) throw new Error("บอทจัดการสมาชิกคนนี้ไม่ได้ กรุณาตรวจลำดับยศของบอท");
     await member.timeout(action.args.minutes * 60_000, action.args.reason || reason);
     return `พักการใช้งาน <@${member.id}> เป็นเวลา **${action.args.minutes} นาที** แล้ว`;
+  }
+
+  if (action.name === "set_server_mute" || action.name === "set_server_deaf") {
+    const member = await guild.members.fetch(action.args.memberId);
+    if (!member.voice.channelId) throw new Error("สมาชิกคนนี้ไม่ได้อยู่ในห้องเสียง");
+    if (!member.manageable) throw new Error("บอทจัดการสมาชิกคนนี้ไม่ได้ กรุณาตรวจลำดับยศของบอท");
+    const auditReason = action.args.reason || reason;
+    if (action.name === "set_server_mute") {
+      await member.voice.setMute(action.args.enabled, auditReason);
+      return `${action.args.enabled ? "ปิด" : "เปิด"}ไมค์ของ <@${member.id}> เรียบร้อยแล้ว`;
+    }
+    await member.voice.setDeaf(action.args.enabled, auditReason);
+    return `${action.args.enabled ? "ปิด" : "เปิด"}เสียงที่ได้ยินของ <@${member.id}> เรียบร้อยแล้ว`;
   }
 
   throw new Error("ไม่รู้จักคำสั่งจัดการเซิร์ฟเวอร์นี้");

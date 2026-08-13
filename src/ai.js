@@ -1,6 +1,16 @@
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_MODEL = "openrouter/free";
 
+export const openRouterWebSearchTool = {
+  type: "openrouter:web_search",
+  parameters: {
+    engine: "exa",
+    max_results: 3,
+    max_total_results: 3,
+    search_context_size: "low",
+  },
+};
+
 export class OpenRouterError extends Error {
   constructor(message, { status, retryAfter } = {}) {
     super(message);
@@ -49,6 +59,21 @@ function extractTranslation(content) {
   const tagged = trimmed.match(/<translation>([\s\S]*?)<\/translation>/iu)?.[1]?.trim();
   if (tagged) return tagged;
   throw new Error("OpenRouter returned an invalid translation response");
+}
+
+function withCitations(content, annotations = []) {
+  const citations = annotations
+    .filter((annotation) => annotation.type === "url_citation")
+    .map((annotation) => annotation.url_citation || annotation)
+    .filter((citation) => /^https?:\/\//iu.test(citation.url || ""))
+    .filter((citation, index, all) => all.findIndex((item) => item.url === citation.url) === index)
+    .filter((citation) => !content.includes(citation.url));
+  if (!citations.length) return content;
+  const links = citations.map((citation) => {
+    const title = String(citation.title || new URL(citation.url).hostname).replace(/[\[\]]/gu, "");
+    return `- [${title}](${citation.url})`;
+  });
+  return content + "\n\n**แหล่งข้อมูล**\n" + links.join("\n");
 }
 
 export function createOpenRouterClient({
@@ -211,7 +236,7 @@ export function createOpenRouterClient({
         if (typeof assistant.content !== "string" || !assistant.content.trim()) {
           throw new Error("OpenRouter returned an empty response");
         }
-        return assistant.content.trim();
+        return withCitations(assistant.content.trim(), assistant.annotations);
       }
       if (!executeTool) throw new Error("OpenRouter requested a tool but no executor is configured");
 
