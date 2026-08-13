@@ -2,6 +2,11 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_TRANSCRIPTION_URL = "https://openrouter.ai/api/v1/audio/transcriptions";
 const DEFAULT_MODEL = "openrouter/free";
 const DEFAULT_STT_MODEL = "openai/whisper-large-v3";
+const DEFAULT_FALLBACK_MODELS = [
+  "google/gemma-4-26b-a4b-it:free",
+  "openai/gpt-oss-20b:free",
+  "liquid/lfm-2.5-2.6b:free",
+];
 
 export const openRouterWebSearchTool = {
   type: "openrouter:web_search",
@@ -101,6 +106,9 @@ export function createOpenRouterClient({
   apiKey = process.env.OPENROUTER_API_KEY,
   model = process.env.OPENROUTER_MODEL || DEFAULT_MODEL,
   sttModel = process.env.OPENROUTER_STT_MODEL || DEFAULT_STT_MODEL,
+  fallbackModels = process.env.OPENROUTER_FALLBACK_MODELS
+    ? process.env.OPENROUTER_FALLBACK_MODELS.split(",").map((item) => item.trim()).filter(Boolean)
+    : DEFAULT_FALLBACK_MODELS,
   fetchImpl = fetch,
 } = {}) {
   async function requestMessage(
@@ -120,6 +128,7 @@ export function createOpenRouterClient({
         },
         body: JSON.stringify({
           model,
+          ...(model === DEFAULT_MODEL && fallbackModels.length ? { models: fallbackModels } : {}),
           messages,
           max_tokens: maxTokens,
           temperature,

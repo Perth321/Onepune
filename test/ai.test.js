@@ -78,6 +78,25 @@ test("falls back to tagged translation when structured output has no provider", 
   assert.equal(calls, 2);
 });
 
+test("sends explicit free-model fallbacks when using the free router", async () => {
+  let captured;
+  const client = createOpenRouterClient({
+    apiKey: "test-secret",
+    model: "openrouter/free",
+    fallbackModels: ["free/model-a", "free/model-b"],
+    fetchImpl: async (_url, options) => {
+      captured = JSON.parse(options.body);
+      return new Response(JSON.stringify({ choices: [{ message: { content: "<reply>โอเค</reply>" } }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+
+  assert.equal(await client.chat([], "ว่าไง"), "โอเค");
+  assert.deepEqual(captured.models, ["free/model-a", "free/model-b"]);
+});
+
 test("runs a server tool and returns the final agent response", async () => {
   const requests = [];
   let calls = 0;

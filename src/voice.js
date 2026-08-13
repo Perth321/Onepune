@@ -198,6 +198,7 @@ export function createVoiceController({ client, transcribe, onTranscript, enable
   const busyGuilds = new Set();
   const syncingGuilds = new Set();
   const errorNoticeAt = new Map();
+  const transcriptionPausedUntil = new Map();
   const lastPacketAt = new Map();
   const lastWatchdogRejoin = new Map();
   const announcedConnections = new WeakSet();
@@ -243,6 +244,7 @@ export function createVoiceController({ client, transcribe, onTranscript, enable
   }
 
   async function handleTranscript({ guild, voiceChannel, userId, pcm }) {
+    if ((transcriptionPausedUntil.get(guild.id) || 0) > Date.now()) return;
     const member = await guild.members.fetch(userId).catch(() => null);
     if (!member || member.user.bot) return;
     let text;
@@ -250,6 +252,9 @@ export function createVoiceController({ client, transcribe, onTranscript, enable
       text = normalizeThaiSpacing(await transcribe(pcmToWav(downmixAndResample(pcm))));
     } catch (error) {
       console.error("Voice transcription failed:", error.message);
+      if ([401, 402, 403].includes(error.status)) {
+        transcriptionPausedUntil.set(guild.id, Date.now() + 5 * 60_000);
+      }
       await notifyTranscriptionError(guild, voiceChannel, error);
       return;
     }
