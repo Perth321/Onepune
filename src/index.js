@@ -22,12 +22,14 @@ import {
   removeAssistantInvocation,
 } from "./ai.js";
 import { createServerToolExecutor, executeServerAction, serverTools } from "./server-tools.js";
+import { createVoiceController } from "./voice.js";
 
 const token = process.env.DISCORD_BOT_TOKEN;
 const githubToken = process.env.GITHUB_TOKEN;
 const repository = process.env.GITHUB_REPOSITORY || "Perth321/Onepune";
 const schedulePath = "data/schedules.json";
 const autoTranslateEnabled = process.env.AUTO_TRANSLATE_ENABLED !== "false";
+const voiceCommandsEnabled = process.env.VOICE_COMMANDS_ENABLED !== "false";
 const BANGKOK_OFFSET_MS = 7 * 60 * 60 * 1000;
 const schedules = [];
 const ai = createOpenRouterClient();
@@ -57,6 +59,12 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildVoiceStates,
   ],
+});
+const voiceController = createVoiceController({
+  client,
+  enabled: voiceCommandsEnabled,
+  transcribe: (wavBuffer) => ai.transcribe(wavBuffer),
+  onTranscript: handleVoiceTranscript,
 });
 
 function apiHeaders() {
@@ -583,6 +591,28 @@ async function handleAssistantChat(message) {
   });
 }
 
+async function handleVoiceTranscript({ guild, member, text, textChannel }) {
+  if (!isAssistantInvocation(text, null)) return;
+  let firstReply = true;
+  const voiceMessage = {
+    guild,
+    member,
+    author: member.user,
+    channel: textChannel,
+    content: text,
+    reply: async (payload) => {
+      const normalized = typeof payload === "string" ? { content: payload } : { ...payload };
+      if (firstReply) {
+        normalized.content = `🎙️ **${member.displayName}:** ${text}\n${normalized.content || ""}`;
+        firstReply = false;
+      }
+      normalized.allowedMentions = { parse: [] };
+      return textChannel.send(normalized);
+    },
+  };
+  await handleAssistantChat(voiceMessage);
+}
+
 async function handleAutomaticTranslation(message) {
   if (!autoTranslateEnabled) return;
   if (message.content.trimStart().startsWith("/")) return;
@@ -684,13 +714,22 @@ client.once("ready", async (readyClient) => {
   console.log("Logged in as " + readyClient.user.tag);
   for (const guild of readyClient.guilds.cache.values()) {
     await registerCommandForGuild(guild);
+    await voiceController.syncGuild(guild);
   }
   await loadSchedules().catch((error) => console.error(error.message));
   setInterval(() => processSchedules().catch((error) => console.error(error.message)), 10000);
   await processSchedules();
 });
 
-client.on("guildCreate", (guild) => registerCommandForGuild(guild));
+client.on("guildCreate", async (guild) => {
+  await registerCommandForGuild(guild);
+  await voiceController.syncGuild(guild);
+});
+client.on("voiceStateUpdate", (_oldState, newState) =>
+  voiceController.syncGuild(newState.guild).catch((error) =>
+    console.error("Voice sync failed:", error.message),
+  ),
+);
 client.on("interactionCreate", (interaction) =>
   handleInteraction(interaction).catch((error) => console.error("Interaction failed:", error.message)),
 );

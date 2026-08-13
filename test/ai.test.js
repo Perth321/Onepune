@@ -142,3 +142,25 @@ test("passes OpenRouter web search server tool and appends URL citations", async
   assert.equal(requestBody.tools[0].type, "openrouter:web_search");
   assert.match(response, /\[Example News\]\(https:\/\/example\.com\/news\)/u);
 });
+
+test("sends WAV audio to the OpenRouter transcription endpoint", async () => {
+  let captured;
+  const client = createOpenRouterClient({
+    apiKey: "test-secret",
+    sttModel: "test/whisper",
+    fetchImpl: async (url, options) => {
+      captured = { url, body: JSON.parse(options.body) };
+      return new Response(JSON.stringify({ text: "วันเพื่อน เช็กสมาชิกหน่อย" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+  const wav = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(100)]);
+
+  assert.equal(await client.transcribe(wav), "วันเพื่อน เช็กสมาชิกหน่อย");
+  assert.equal(captured.url, "https://openrouter.ai/api/v1/audio/transcriptions");
+  assert.equal(captured.body.model, "test/whisper");
+  assert.equal(captured.body.input_audio.format, "wav");
+  assert.equal(captured.body.input_audio.data, wav.toString("base64"));
+});

@@ -41,7 +41,9 @@ jobs:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL || 'openrouter/free' }}
+          OPENROUTER_STT_MODEL: ${{ vars.OPENROUTER_STT_MODEL || 'openai/whisper-large-v3' }}
           AUTO_TRANSLATE_ENABLED: ${{ vars.AUTO_TRANSLATE_ENABLED || 'true' }}
+          VOICE_COMMANDS_ENABLED: ${{ vars.VOICE_COMMANDS_ENABLED || 'true' }}
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: node src/index.js
