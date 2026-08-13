@@ -13,12 +13,14 @@ import {
   TextInputBuilder,
   TextInputStyle,
 } from "discord.js";
+import { randomUUID } from "node:crypto";
 import {
   createOpenRouterClient,
   detectTranslationDirection,
   isAssistantInvocation,
   removeAssistantInvocation,
 } from "./ai.js";
+import { createServerToolExecutor, executeServerAction, serverTools } from "./server-tools.js";
 
 const token = process.env.DISCORD_BOT_TOKEN;
 const githubToken = process.env.GITHUB_TOKEN;
@@ -30,9 +32,11 @@ const schedules = [];
 const ai = createOpenRouterClient();
 const conversationHistory = new Map();
 const aiCooldowns = new Map();
+const pendingAgentActions = new Map();
 let saveQueue = Promise.resolve();
 const AI_COOLDOWN_MS = 5000;
 const MAX_HISTORY_MESSAGES = 8;
+const AGENT_ACTION_TTL_MS = 5 * 60 * 1000;
 const onepuneCommand = new SlashCommandBuilder()
   .setName("onepune")
   .setDescription("เปิดแผงควบคุมเช็กชื่อวันเพื่อน")
@@ -267,6 +271,65 @@ async function showPanel(interaction) {
   });
 }
 
+function confirmationButtons(action) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("agent:confirm:" + action.id)
+      .setLabel("ยืนยันทำรายการ")
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId("agent:cancel:" + action.id)
+      .setLabel("ยกเลิก")
+      .setStyle(ButtonStyle.Secondary),
+  );
+}
+
+function confirmationSummary(action) {
+  if (action.name === "create_text_channel") {
+    return `สร้างช่องข้อความชื่อ **${action.args.name}**`;
+  }
+  if (action.name === "rename_channel") {
+    return `เปลี่ยนชื่อ <#${action.args.channelId}> เป็น **${action.args.newName}**`;
+  }
+  if (action.name === "set_slowmode") {
+    return `ตั้ง slowmode ของ <#${action.args.channelId}> เป็น **${action.args.seconds} วินาที**`;
+  }
+  if (action.name === "timeout_member") {
+    return `พักการใช้งาน <@${action.args.memberId}> เป็นเวลา **${action.args.minutes} นาที**`;
+  }
+  return "ทำรายการจัดการเซิร์ฟเวอร์";
+}
+
+async function handleAgentConfirmation(interaction) {
+  const [, decision, actionId] = interaction.customId.split(":");
+  const action = pendingAgentActions.get(actionId);
+  if (!action || action.expiresAt <= Date.now()) {
+    if (action) pendingAgentActions.delete(actionId);
+    return interaction.reply({ content: "รายการนี้หมดอายุแล้ว ลองสั่งวันเพื่อนใหม่อีกครั้ง", ephemeral: true });
+  }
+  if (action.userId !== interaction.user.id || action.guildId !== interaction.guildId) {
+    return interaction.reply({ content: "ปุ่มนี้ให้คนที่ออกคำสั่งเป็นคนกดเท่านั้น", ephemeral: true });
+  }
+
+  pendingAgentActions.delete(actionId);
+  if (decision === "cancel") {
+    return interaction.update({ content: "ยกเลิกรายการแล้ว โอเค ไม่แอบไปซนกับเซิร์ฟเวอร์ให้ 😌", components: [] });
+  }
+
+  await interaction.deferUpdate();
+  try {
+    const result = await executeServerAction(interaction, action);
+    await interaction.editReply({ content: "✅ " + result, components: [], allowedMentions: { parse: [] } });
+  } catch (error) {
+    console.error("Server action failed:", error.message);
+    await interaction.editReply({
+      content: "❌ ทำรายการไม่สำเร็จ: " + error.message,
+      components: [],
+      allowedMentions: { parse: [] },
+    });
+  }
+}
+
 async function handleInteraction(interaction) {
   if (interaction.isChatInputCommand() && interaction.commandName === "onepune") {
     return showPanel(interaction);
@@ -275,6 +338,8 @@ async function handleInteraction(interaction) {
   if (!interaction.guild) return;
 
   if (interaction.isButton()) {
+    if (interaction.customId.startsWith("agent:")) return handleAgentConfirmation(interaction);
+
     const [prefix, action, userId] = interaction.customId.split(":");
     if (prefix !== "onepune") return;
 
@@ -418,17 +483,31 @@ async function replyWithAi(message, task) {
 
   await message.channel.sendTyping().catch(() => null);
   try {
-    const response = await task();
-    for (const part of chunks(response)) {
+    const result = await task();
+    const response = typeof result === "string" ? result : result.content;
+    const components = typeof result === "string" ? [] : result.components || [];
+    const parts = chunks(response);
+    for (const [index, part] of parts.entries()) {
       await message.reply({
         content: part,
+        components: index === parts.length - 1 ? components : [],
         allowedMentions: { parse: [], repliedUser: false },
       });
     }
   } catch (error) {
     console.error("AI request failed:", error.message);
+    let content = "ตอนนี้ระบบแปล/สนทนาตอบไม่สำเร็จ ลองใหม่อีกครั้งในอีกสักครู่";
+    if (error.status === 429) {
+      content = "โควตาโมเดลฟรีของ OpenRouter เต็มแล้ววันนี้ 😵 ต้องรอรีเซ็ตหรือเติมเครดิตใน OpenRouter";
+    } else if (error.status === 401 || error.status === 403) {
+      content = "OpenRouter ปฏิเสธคีย์ API กรุณาตรวจหรือสร้าง Secret `OPENROUTER_API_KEY` ใหม่";
+    } else if (error.status === 402) {
+      content = "เครดิต OpenRouter ไม่พอ กรุณาเติมเครดิตหรือเปลี่ยนไปใช้โมเดลฟรี";
+    } else if (error.status === 503) {
+      content = "ตอนนี้โมเดลฟรีของ OpenRouter ไม่มีคิวว่าง ลองใหม่อีกทีนะ ระบบมันงอแงนิดนึง";
+    }
     await message.reply({
-      content: "ตอนนี้ระบบแปล/สนทนาตอบไม่สำเร็จครับ ลองใหม่อีกครั้งในอีกสักครู่",
+      content,
       allowedMentions: { repliedUser: false },
     });
   }
@@ -442,14 +521,50 @@ async function handleAssistantChat(message) {
     "ทักทายฉันและถามว่ามีอะไรให้ช่วย";
 
   await replyWithAi(message, async () => {
-    const response = await ai.chat(history, prompt);
+    let pendingAction = null;
+    const queueAction = ({ name, args, permission }) => {
+      if (pendingAction) throw new Error("Only one server change can be confirmed at a time");
+      const action = {
+        id: randomUUID().replaceAll("-", "").slice(0, 12),
+        name,
+        args,
+        permission,
+        userId: message.author.id,
+        guildId: message.guild.id,
+        expiresAt: Date.now() + AGENT_ACTION_TTL_MS,
+      };
+      pendingAgentActions.set(action.id, action);
+      pendingAction = action;
+      return action;
+    };
+    const executeTool = createServerToolExecutor({ message, queueAction });
+    const needsServerTools = /(เซิร์ฟ|เซิฟ|ช่อง|ห้อง|ยศ|สมาชิก|สโลว์|ไทม์เอาต์|server|channel|role|member|slowmode|timeout)/iu.test(
+      prompt,
+    );
+    let response;
+    try {
+      response = await ai.chat(history, prompt, {
+        tools: needsServerTools ? serverTools : [],
+        executeTool,
+      });
+    } catch (error) {
+      if (pendingAction) pendingAgentActions.delete(pendingAction.id);
+      throw error;
+    }
     conversationHistory.set(
       key,
       [...history, { role: "user", content: prompt }, { role: "assistant", content: response }].slice(
         -MAX_HISTORY_MESSAGES,
       ),
     );
-    return response;
+    return {
+      content:
+        response +
+        (pendingAction
+          ? "\n\n⚠️ **รอยืนยัน:** " + confirmationSummary(pendingAction) + "\nปุ่มจะหมดอายุใน 5 นาที"
+          : ""),
+      components: pendingAction ? [confirmationButtons(pendingAction)] : [],
+    };
   });
 }
 

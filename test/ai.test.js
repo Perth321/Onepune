@@ -48,3 +48,66 @@ test("sends translation requests without exposing the key in the body", async ()
   assert.equal(requestBody.provider.require_parameters, true);
   assert.match(requestBody.messages[0].content, /never a question for you to answer/u);
 });
+
+test("falls back to tagged translation when structured output has no provider", async () => {
+  let calls = 0;
+  const client = createOpenRouterClient({
+    apiKey: "test-secret",
+    model: "openrouter/free",
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls === 1) return new Response("unavailable", { status: 503 });
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: "<translation>เล่น Roblox แมพอะไรดี</translation>" } }] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    },
+  });
+
+  assert.equal(await client.translate("Which Roblox map should we play?", "en-to-th"), "เล่น Roblox แมพอะไรดี");
+  assert.equal(calls, 2);
+});
+
+test("runs a server tool and returns the final agent response", async () => {
+  const requests = [];
+  let calls = 0;
+  const client = createOpenRouterClient({
+    apiKey: "test-secret",
+    model: "test/model",
+    fetchImpl: async (_url, options) => {
+      requests.push(JSON.parse(options.body));
+      calls += 1;
+      const message = calls === 1
+        ? {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call-1",
+                type: "function",
+                function: { name: "get_server_overview", arguments: "{}" },
+              },
+            ],
+          }
+        : { role: "assistant", content: "เซิร์ฟนี้มี 42 คน จัดว่าแน่นเหมือนรถตู้ตอนเลิกงาน 😆" };
+      return new Response(JSON.stringify({ choices: [{ message }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+  let executed;
+  const response = await client.chat([], "เซิร์ฟนี้มีกี่คน", {
+    tools: [{ type: "function", function: { name: "get_server_overview", parameters: { type: "object" } } }],
+    executeTool: async (name, args) => {
+      executed = { name, args };
+      return { ok: true, members: 42 };
+    },
+  });
+
+  assert.equal(executed.name, "get_server_overview");
+  assert.deepEqual(executed.args, {});
+  assert.match(response, /42/u);
+  assert.equal(requests[0].parallel_tool_calls, false);
+  assert.equal(requests[1].messages.at(-1).role, "tool");
+});
