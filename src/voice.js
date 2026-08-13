@@ -1,6 +1,12 @@
+import { Readable } from "node:stream";
 import {
+  AudioPlayerStatus,
   EndBehaviorType,
+  NoSubscriberBehavior,
+  StreamType,
   VoiceConnectionStatus,
+  createAudioPlayer,
+  createAudioResource,
   entersState,
   getVoiceConnection,
   joinVoiceChannel,
@@ -8,14 +14,66 @@ import {
 import { ChannelType, PermissionFlagsBits } from "discord.js";
 import prism from "prism-media";
 
-const SAMPLE_RATE = 48_000;
-const CHANNELS = 2;
-const BYTES_PER_SAMPLE = 2;
-const MAX_AUDIO_SECONDS = 15;
-const MAX_PCM_BYTES = SAMPLE_RATE * CHANNELS * BYTES_PER_SAMPLE * MAX_AUDIO_SECONDS;
-const MIN_PCM_BYTES = SAMPLE_RATE * CHANNELS * BYTES_PER_SAMPLE * 0.25;
+const INPUT_SAMPLE_RATE = 48_000;
+const INPUT_CHANNELS = 2;
+const INPUT_BYTES_PER_SECOND = INPUT_SAMPLE_RATE * INPUT_CHANNELS * 2;
+const OUTPUT_SAMPLE_RATE = 16_000;
+const MIN_UTTERANCE_SECONDS = 0.35;
+const MAX_UTTERANCE_SECONDS = 5;
+const IDLE_FLUSH_MS = 1500;
+const WAKE_PENDING_MS = 15_000;
+const WATCHDOG_MS = 60_000;
+const WATCHDOG_COOLDOWN_MS = 3 * 60_000;
+const MAX_QUEUE = 32;
+const MAX_CONCURRENT_TRANSCRIPTIONS = 4;
 
-export function pcmToWav(pcm) {
+const WAKE_TOKEN_RE =
+  /(?:วันเพื่อนๆ|วัน\s*เพื่อน|วันเพิ่อน|วันเพื้อน|วันเพือน|one\s*friend|wan\s*puean|wan\s*phuean)/iu;
+const WAKE_PREFIX_RE = /^(?:[\s,.;:!?\-]+|อืม|เอ่อ|เออ|อะ|นี่|เฮ้|hey)\s*/iu;
+
+function normalizeThaiSpacing(text) {
+  let current = String(text || "").trim();
+  let previous;
+  do {
+    previous = current;
+    current = current.replace(/([\u0E00-\u0E7F])\s+(?=[\u0E00-\u0E7F])/gu, "$1");
+  } while (current !== previous);
+  return current;
+}
+
+export function extractVoiceCommand(text) {
+  let cleaned = normalizeThaiSpacing(text)
+    .replace(/^\[[^\]]{1,60}\]\s*/u, "")
+    .replace(/^\([^)]{1,60}\)\s*/u, "")
+    .trim();
+  for (let index = 0; index < 2; index += 1) cleaned = cleaned.replace(WAKE_PREFIX_RE, "");
+  const match = cleaned.match(WAKE_TOKEN_RE);
+  if (!match || match.index !== 0) return null;
+  return cleaned
+    .slice(match[0].length)
+    .replace(WAKE_PREFIX_RE, "")
+    .replace(/^[\s,.;:!?\-]+/u, "")
+    .trim();
+}
+
+function downmixAndResample(pcm) {
+  const inputFrames = Math.floor(pcm.length / 4);
+  const ratio = INPUT_SAMPLE_RATE / OUTPUT_SAMPLE_RATE;
+  const outputSamples = Math.floor(inputFrames / ratio);
+  const output = Buffer.alloc(outputSamples * 2);
+  for (let index = 0; index < outputSamples; index += 1) {
+    const sourceFrame = Math.floor(index * ratio);
+    const offset = sourceFrame * 4;
+    const left = pcm.readInt16LE(offset);
+    const right = pcm.readInt16LE(offset + 2);
+    const mono = Math.max(-32768, Math.min(32767, Math.round((left + right) / 2)));
+    output.writeInt16LE(mono, index * 2);
+  }
+  return output;
+}
+
+export function pcmToWav(pcm, sampleRate = OUTPUT_SAMPLE_RATE, channels = 1) {
+  const bytesPerSample = 2;
   const header = Buffer.alloc(44);
   header.write("RIFF", 0);
   header.writeUInt32LE(36 + pcm.length, 4);
@@ -23,18 +81,69 @@ export function pcmToWav(pcm) {
   header.write("fmt ", 12);
   header.writeUInt32LE(16, 16);
   header.writeUInt16LE(1, 20);
-  header.writeUInt16LE(CHANNELS, 22);
-  header.writeUInt32LE(SAMPLE_RATE, 24);
-  header.writeUInt32LE(SAMPLE_RATE * CHANNELS * BYTES_PER_SAMPLE, 28);
-  header.writeUInt16LE(CHANNELS * BYTES_PER_SAMPLE, 32);
-  header.writeUInt16LE(BYTES_PER_SAMPLE * 8, 34);
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * channels * bytesPerSample, 28);
+  header.writeUInt16LE(channels * bytesPerSample, 32);
+  header.writeUInt16LE(bytesPerSample * 8, 34);
   header.write("data", 36);
   header.writeUInt32LE(pcm.length, 40);
   return Buffer.concat([header, pcm]);
 }
 
+function generateTone(segments, gain = 0.5) {
+  const totalSamples = segments.reduce(
+    (sum, segment) => sum + Math.floor((INPUT_SAMPLE_RATE * segment.ms) / 1000),
+    0,
+  );
+  const output = Buffer.alloc(totalSamples * INPUT_CHANNELS * 2);
+  let offset = 0;
+  for (const segment of segments) {
+    const samples = Math.floor((INPUT_SAMPLE_RATE * segment.ms) / 1000);
+    const omega = (2 * Math.PI * segment.frequency) / INPUT_SAMPLE_RATE;
+    const fade = Math.min(960, Math.floor(samples / 5));
+    let phase = 0;
+    for (let index = 0; index < samples; index += 1) {
+      const envelope = segment.frequency
+        ? Math.min(1, index / Math.max(1, fade), (samples - index) / Math.max(1, fade))
+        : 0;
+      const sample = Math.round(Math.sin(phase) * gain * envelope * 32767);
+      output.writeInt16LE(sample, offset);
+      output.writeInt16LE(sample, offset + 2);
+      offset += 4;
+      phase += omega;
+    }
+  }
+  return output;
+}
+
+const JOIN_BEEP = generateTone([
+  { frequency: 880, ms: 180 },
+  { frequency: 0, ms: 80 },
+  { frequency: 1100, ms: 220 },
+]);
+const WAKE_BEEP = generateTone([
+  { frequency: 1400, ms: 110 },
+  { frequency: 0, ms: 70 },
+  { frequency: 1700, ms: 130 },
+]);
+const DONE_BEEP = generateTone([
+  { frequency: 880, ms: 200 },
+  { frequency: 660, ms: 250 },
+]);
+
 function humanMembers(channel) {
   return [...channel.members.values()].filter((member) => !member.user.bot);
+}
+
+function bestVoiceChannel(guild) {
+  return [...guild.channels.cache.values()]
+    .filter(
+      (channel) =>
+        [ChannelType.GuildVoice, ChannelType.GuildStageVoice].includes(channel.type) &&
+        humanMembers(channel).length,
+    )
+    .sort((a, b) => humanMembers(b).length - humanMembers(a).length)[0];
 }
 
 function responseChannel(guild, voiceChannel) {
@@ -43,7 +152,6 @@ function responseChannel(guild, voiceChannel) {
     channel?.isTextBased() &&
     channel.permissionsFor(me)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]);
   if (canWrite(guild.systemChannel)) return guild.systemChannel;
-
   const nearby = [...guild.channels.cache.values()]
     .filter((channel) => channel.type === ChannelType.GuildText && channel.parentId === voiceChannel.parentId)
     .find(canWrite);
@@ -54,117 +162,252 @@ function responseChannel(guild, voiceChannel) {
 }
 
 export function createVoiceController({ client, transcribe, onTranscript, enabled = true }) {
-  const attachedConnections = new WeakSet();
-  const recordingUsers = new Set();
-  const leavingTimers = new Map();
+  const subscriptions = new Map();
+  const audioBuffers = new Map();
+  const pendingWake = new Map();
+  const busyGuilds = new Set();
   const syncingGuilds = new Set();
   const errorNoticeAt = new Map();
-  let transcriptionsInFlight = 0;
+  const lastPacketAt = new Map();
+  const lastWatchdogRejoin = new Map();
+  const announcedConnections = new WeakSet();
+  const attachedReceivers = new WeakSet();
+  const queue = [];
+  let activeTranscriptions = 0;
 
-  async function processRecording(guild, voiceChannel, userId, pcm) {
-    if (pcm.length < MIN_PCM_BYTES || transcriptionsInFlight >= 2) return;
+  async function playBeep(connection, pcm, label) {
+    if (!connection || connection.state.status === VoiceConnectionStatus.Destroyed) return;
+    const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
+    const resource = createAudioResource(Readable.from([pcm]), { inputType: StreamType.Raw });
+    const subscription = connection.subscribe(player);
+    if (!subscription) return;
+    player.play(resource);
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 4000);
+      timer.unref();
+      player.once(AudioPlayerStatus.Idle, () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      player.once("error", (error) => {
+        console.error(`Voice ${label} failed:`, error.message);
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    subscription.unsubscribe();
+  }
+
+  async function notifyTranscriptionError(guild, voiceChannel, error) {
+    const previous = errorNoticeAt.get(guild.id) || 0;
+    if (![401, 402, 403, 429].includes(error.status) || Date.now() - previous < 5 * 60_000) return;
+    errorNoticeAt.set(guild.id, Date.now());
+    const channel = responseChannel(guild, voiceChannel);
+    await channel?.send({
+      content:
+        error.status === 402
+          ? "🎙️ เครดิตสำหรับถอดเสียงไม่พอ จึงพักรับคำสั่งเสียงชั่วคราว"
+          : "🎙️ ระบบถอดเสียงใช้งานไม่ได้ชั่วคราว กรุณาตรวจคีย์หรือโควตา",
+      allowedMentions: { parse: [] },
+    }).catch(() => null);
+  }
+
+  async function handleTranscript({ guild, voiceChannel, userId, pcm }) {
     const member = await guild.members.fetch(userId).catch(() => null);
     if (!member || member.user.bot) return;
-
-    transcriptionsInFlight += 1;
+    let text;
     try {
-      const text = await transcribe(pcmToWav(pcm));
-      const textChannel = responseChannel(guild, voiceChannel);
-      if (text && textChannel) await onTranscript({ guild, member, text, textChannel, voiceChannel });
+      text = normalizeThaiSpacing(await transcribe(pcmToWav(downmixAndResample(pcm))));
     } catch (error) {
       console.error("Voice transcription failed:", error.message);
-      const channel = responseChannel(guild, voiceChannel);
-      const previousNotice = errorNoticeAt.get(guild.id) || 0;
-      if (
-        channel &&
-        [401, 402, 403, 429].includes(error.status) &&
-        Date.now() - previousNotice >= 5 * 60 * 1000
-      ) {
-        errorNoticeAt.set(guild.id, Date.now());
-        await channel.send({
-          content:
-            error.status === 402
-              ? "🎙️ เครดิต OpenRouter สำหรับถอดเสียงไม่พอ จึงพักรับคำสั่งเสียงชั่วคราว"
-              : "🎙️ ระบบถอดเสียง OpenRouter ใช้งานไม่ได้ชั่วคราว กรุณาตรวจคีย์หรือโควตา",
-          allowedMentions: { parse: [] },
-        }).catch(() => null);
-      }
+      await notifyTranscriptionError(guild, voiceChannel, error);
+      return;
+    }
+    if (!text) return;
+
+    const pending = pendingWake.get(userId);
+    let command = null;
+    let followUp = false;
+    if (pending && Date.now() - pending < WAKE_PENDING_MS) {
+      pendingWake.delete(userId);
+      followUp = true;
+      command = extractVoiceCommand(text) ?? text;
+    } else {
+      pendingWake.delete(userId);
+      command = extractVoiceCommand(text);
+    }
+    if (command === null) return;
+
+    const connection = getVoiceConnection(guild.id);
+    if (!followUp) await playBeep(connection, WAKE_BEEP, "wake beep");
+    if (!command) {
+      pendingWake.set(userId, Date.now());
+      const timer = setTimeout(() => pendingWake.delete(userId), WAKE_PENDING_MS);
+      timer.unref();
+      return;
+    }
+    if (busyGuilds.has(guild.id)) return;
+
+    const textChannel = responseChannel(guild, voiceChannel);
+    if (!textChannel) return;
+    busyGuilds.add(guild.id);
+    try {
+      await onTranscript({
+        guild,
+        member,
+        text: "วันเพื่อน " + command,
+        rawTranscript: text,
+        textChannel,
+        voiceChannel,
+      });
     } finally {
-      transcriptionsInFlight -= 1;
+      await playBeep(getVoiceConnection(guild.id), DONE_BEEP, "done beep");
+      busyGuilds.delete(guild.id);
     }
   }
 
-  function recordUser(connection, guild, voiceChannel, userId) {
-    const recordingKey = guild.id + ":" + userId;
-    if (recordingUsers.has(recordingKey)) return;
-    recordingUsers.add(recordingKey);
+  function pumpQueue() {
+    while (activeTranscriptions < MAX_CONCURRENT_TRANSCRIPTIONS && queue.length) {
+      const job = queue.shift();
+      activeTranscriptions += 1;
+      handleTranscript(job)
+        .catch((error) => console.error("Voice command failed:", error.message))
+        .finally(() => {
+          activeTranscriptions -= 1;
+          setImmediate(pumpQueue);
+        });
+    }
+  }
 
-    const opusStream = connection.receiver.subscribe(userId, {
-      end: { behavior: EndBehaviorType.AfterSilence, duration: 1000 },
-    });
-    const decoder = new prism.opus.Decoder({ rate: SAMPLE_RATE, channels: CHANNELS, frameSize: 960 });
-    const chunks = [];
-    let bytes = 0;
-    let finished = false;
+  function enqueue(job) {
+    if (queue.length >= MAX_QUEUE) {
+      console.warn("Voice transcription queue full; dropping utterance from", job.userId);
+      return;
+    }
+    queue.push(job);
+    pumpQueue();
+  }
 
-    const finish = () => {
-      if (finished) return;
-      finished = true;
-      recordingUsers.delete(recordingKey);
-      const pcm = Buffer.concat(chunks, Math.min(bytes, MAX_PCM_BYTES)).subarray(0, MAX_PCM_BYTES);
-      void processRecording(guild, voiceChannel, userId, pcm);
-    };
-    const timer = setTimeout(() => {
-      opusStream.destroy();
-      decoder.end();
-      finish();
-    }, (MAX_AUDIO_SECONDS + 1) * 1000);
-    timer.unref();
+  function flushUserAudio(guild, voiceChannel, userId, reason) {
+    const key = guild.id + ":" + userId;
+    const buffer = audioBuffers.get(key);
+    if (!buffer?.chunks.length) return;
+    const pcm = Buffer.concat(buffer.chunks, buffer.totalBytes);
+    buffer.chunks = [];
+    buffer.totalBytes = 0;
+    const durationSeconds = pcm.length / INPUT_BYTES_PER_SECOND;
+    if (durationSeconds < MIN_UTTERANCE_SECONDS) return;
+    enqueue({ guild, voiceChannel, userId, pcm, reason });
+  }
 
-    decoder.on("data", (chunk) => {
-      if (bytes >= MAX_PCM_BYTES) return;
-      const remaining = MAX_PCM_BYTES - bytes;
-      const kept = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
-      chunks.push(kept);
-      bytes += kept.length;
-    });
-    decoder.once("end", finish);
-    decoder.once("close", finish);
-    decoder.once("error", (error) => {
-      console.error("Voice decoder failed:", error.message);
-      finish();
-    });
-    opusStream.once("error", (error) => {
-      console.error("Voice receive failed:", error.message);
-      finish();
-    });
-    opusStream.once("close", () => clearTimeout(timer));
-    opusStream.pipe(decoder);
+  function appendPcm(guild, voiceChannel, userId, chunk) {
+    const key = guild.id + ":" + userId;
+    const buffer = audioBuffers.get(key) || { chunks: [], totalBytes: 0, lastAppendAt: 0 };
+    buffer.chunks.push(chunk);
+    buffer.totalBytes += chunk.length;
+    buffer.lastAppendAt = Date.now();
+    buffer.guild = guild;
+    buffer.voiceChannel = voiceChannel;
+    buffer.userId = userId;
+    audioBuffers.set(key, buffer);
+    lastPacketAt.set(guild.id, Date.now());
+    if (buffer.totalBytes >= INPUT_BYTES_PER_SECOND * MAX_UTTERANCE_SECONDS) {
+      flushUserAudio(guild, voiceChannel, userId, "max-length");
+    }
+  }
+
+  function subscribeUser(connection, guild, voiceChannel, userId) {
+    const key = guild.id + ":" + userId;
+    if (subscriptions.has(key) || guild.members.cache.get(userId)?.user.bot) return;
+    try {
+      const stream = connection.receiver.subscribe(userId, {
+        end: { behavior: EndBehaviorType.Manual },
+      });
+      const decoder = new prism.opus.Decoder({
+        rate: INPUT_SAMPLE_RATE,
+        channels: INPUT_CHANNELS,
+        frameSize: 960,
+      });
+      stream.pipe(decoder);
+      subscriptions.set(key, { stream, decoder });
+      decoder.on("data", (chunk) => appendPcm(guild, voiceChannel, userId, chunk));
+      const cleanup = () => {
+        subscriptions.delete(key);
+        audioBuffers.delete(key);
+      };
+      stream.once("error", cleanup);
+      stream.once("close", cleanup);
+      decoder.once("error", (error) => {
+        console.error("Voice decoder failed:", error.message);
+        cleanup();
+      });
+    } catch (error) {
+      console.error("Voice subscription failed:", error.message);
+    }
+  }
+
+  function clearGuildAudio(guildId) {
+    for (const [key, subscription] of subscriptions) {
+      if (!key.startsWith(guildId + ":")) continue;
+      subscription.stream.destroy();
+      subscription.decoder.destroy();
+      subscriptions.delete(key);
+    }
+    for (const key of audioBuffers.keys()) {
+      if (key.startsWith(guildId + ":")) audioBuffers.delete(key);
+    }
+  }
+
+  function attachReceiver(connection, guild, voiceChannel) {
+    if (attachedReceivers.has(connection.receiver)) return;
+    attachedReceivers.add(connection.receiver);
+    connection.receiver.speaking.on("start", (userId) =>
+      subscribeUser(connection, guild, voiceChannel, userId),
+    );
+    connection.receiver.speaking.on("end", (userId) =>
+      flushUserAudio(guild, voiceChannel, userId, "speaking-end"),
+    );
+    for (const member of humanMembers(voiceChannel)) {
+      subscribeUser(connection, guild, voiceChannel, member.id);
+    }
   }
 
   async function connect(guild, voiceChannel) {
+    clearGuildAudio(guild.id);
     const connection = joinVoiceChannel({
       channelId: voiceChannel.id,
       guildId: guild.id,
       adapterCreator: guild.voiceAdapterCreator,
       selfDeaf: false,
-      selfMute: true,
+      selfMute: false,
     });
-    if (!attachedConnections.has(connection)) {
-      attachedConnections.add(connection);
-      connection.receiver.speaking.on("start", (userId) =>
-        recordUser(connection, guild, voiceChannel, userId),
-      );
-    }
+    connection.on("error", (error) => console.error("Voice connection failed:", error.message));
+    connection.on(VoiceConnectionStatus.Disconnected, async () => {
+      try {
+        await Promise.race([
+          entersState(connection, VoiceConnectionStatus.Signalling, 5000),
+          entersState(connection, VoiceConnectionStatus.Connecting, 5000),
+        ]);
+      } catch {
+        connection.destroy();
+        clearGuildAudio(guild.id);
+      }
+    });
     try {
-      await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
-      const channel = responseChannel(guild, voiceChannel);
-      await channel?.send({
-        content:
-          `🎙️ เข้าห้อง **${voiceChannel.name}** แล้ว พูดขึ้นต้นด้วย **วันเพื่อน** เพื่อสั่งงาน ` +
-          "(คลิปคำพูดสั้น ๆ จะถูกส่งไป OpenRouter เพื่อถอดเสียง)",
-        allowedMentions: { parse: [] },
-      }).catch(() => null);
+      await entersState(connection, VoiceConnectionStatus.Ready, 60_000);
+      attachReceiver(connection, guild, voiceChannel);
+      lastPacketAt.set(guild.id, Date.now());
+      if (!announcedConnections.has(connection)) {
+        announcedConnections.add(connection);
+        await playBeep(connection, JOIN_BEEP, "join beep");
+        await responseChannel(guild, voiceChannel)?.send({
+          content:
+            `🎙️ เข้าห้อง **${voiceChannel.name}** แล้ว พูด **วันเพื่อน** แล้วตามด้วยคำสั่ง ` +
+            "หรือพูด “วันเพื่อน” ก่อน แล้วพูดคำสั่งภายใน 15 วินาทีได้ " +
+            "(ช่วงเสียงจะถูกส่งไป OpenRouter เพื่อถอดเสียง)",
+          allowedMentions: { parse: [] },
+        }).catch(() => null);
+      }
     } catch (error) {
       console.error("Could not join voice in " + guild.name + ":", error.message);
       connection.destroy();
@@ -172,48 +415,60 @@ export function createVoiceController({ client, transcribe, onTranscript, enable
   }
 
   async function syncGuild(guild) {
-    if (!enabled || !guild?.available) return;
-    if (syncingGuilds.has(guild.id)) return;
+    if (!enabled || !guild?.available || syncingGuilds.has(guild.id)) return;
     syncingGuilds.add(guild.id);
     try {
+      const target = bestVoiceChannel(guild);
       const existing = getVoiceConnection(guild.id);
-      const currentChannel = existing
-        ? guild.channels.cache.get(existing.joinConfig.channelId)
-        : null;
-      if (currentChannel && humanMembers(currentChannel).length) {
-        clearTimeout(leavingTimers.get(guild.id));
-        leavingTimers.delete(guild.id);
+      if (!target) {
+        if (existing) existing.destroy();
+        clearGuildAudio(guild.id);
         return;
       }
 
-      const target = [...guild.channels.cache.values()]
-        .filter((channel) => channel.type === ChannelType.GuildVoice && humanMembers(channel).length)
-        .sort((a, b) => humanMembers(b).length - humanMembers(a).length)[0];
-      if (target) {
-        clearTimeout(leavingTimers.get(guild.id));
-        leavingTimers.delete(guild.id);
+      const currentChannelId = existing?.joinConfig.channelId;
+      if (!existing || currentChannelId !== target.id) {
         if (existing) existing.destroy();
         await connect(guild, target);
         return;
       }
-
-      if (existing && !leavingTimers.has(guild.id)) {
-        const timer = setTimeout(() => {
-          getVoiceConnection(guild.id)?.destroy();
-          leavingTimers.delete(guild.id);
-        }, 30_000);
-        timer.unref();
-        leavingTimers.set(guild.id, timer);
+      attachReceiver(existing, guild, target);
+      const lastAudio = lastPacketAt.get(guild.id) || Date.now();
+      const lastRejoin = lastWatchdogRejoin.get(guild.id) || 0;
+      if (Date.now() - lastAudio > WATCHDOG_MS && Date.now() - lastRejoin > WATCHDOG_COOLDOWN_MS) {
+        lastWatchdogRejoin.set(guild.id, Date.now());
+        existing.destroy();
+        await connect(guild, target);
       }
     } finally {
       syncingGuilds.delete(guild.id);
     }
   }
 
+  const idleFlushTimer = setInterval(() => {
+    const now = Date.now();
+    for (const buffer of audioBuffers.values()) {
+      if (buffer.totalBytes && now - buffer.lastAppendAt > IDLE_FLUSH_MS) {
+        flushUserAudio(buffer.guild, buffer.voiceChannel, buffer.userId, "idle");
+      }
+    }
+  }, 1000);
+  idleFlushTimer.unref();
+
+  const syncTimer = setInterval(() => {
+    for (const guild of client.guilds.cache.values()) {
+      void syncGuild(guild).catch((error) => console.error("Voice sync failed:", error.message));
+    }
+  }, 5000);
+  syncTimer.unref();
+
   function destroy() {
-    for (const guild of client.guilds.cache.values()) getVoiceConnection(guild.id)?.destroy();
-    for (const timer of leavingTimers.values()) clearTimeout(timer);
-    leavingTimers.clear();
+    clearInterval(idleFlushTimer);
+    clearInterval(syncTimer);
+    for (const guild of client.guilds.cache.values()) {
+      getVoiceConnection(guild.id)?.destroy();
+      clearGuildAudio(guild.id);
+    }
   }
 
   return { destroy, syncGuild };

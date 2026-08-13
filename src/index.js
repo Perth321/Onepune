@@ -22,6 +22,7 @@ import {
   removeAssistantInvocation,
 } from "./ai.js";
 import { createServerToolExecutor, executeServerAction, serverTools } from "./server-tools.js";
+import { createVoiceTranscriber } from "./stt.js";
 import { createVoiceController } from "./voice.js";
 
 const token = process.env.DISCORD_BOT_TOKEN;
@@ -33,6 +34,7 @@ const voiceCommandsEnabled = process.env.VOICE_COMMANDS_ENABLED !== "false";
 const BANGKOK_OFFSET_MS = 7 * 60 * 60 * 1000;
 const schedules = [];
 const ai = createOpenRouterClient();
+const transcribeVoice = createVoiceTranscriber({ fallback: (wavBuffer) => ai.transcribe(wavBuffer) });
 const conversationHistory = new Map();
 const aiCooldowns = new Map();
 const pendingAgentActions = new Map();
@@ -63,7 +65,7 @@ const client = new Client({
 const voiceController = createVoiceController({
   client,
   enabled: voiceCommandsEnabled,
-  transcribe: (wavBuffer) => ai.transcribe(wavBuffer),
+  transcribe: transcribeVoice,
   onTranscript: handleVoiceTranscript,
 });
 
@@ -591,7 +593,7 @@ async function handleAssistantChat(message) {
   });
 }
 
-async function handleVoiceTranscript({ guild, member, text, textChannel }) {
+async function handleVoiceTranscript({ guild, member, text, rawTranscript, textChannel }) {
   if (!isAssistantInvocation(text, null)) return;
   let firstReply = true;
   const voiceMessage = {
@@ -603,7 +605,7 @@ async function handleVoiceTranscript({ guild, member, text, textChannel }) {
     reply: async (payload) => {
       const normalized = typeof payload === "string" ? { content: payload } : { ...payload };
       if (firstReply) {
-        normalized.content = `🎙️ **${member.displayName}:** ${text}\n${normalized.content || ""}`;
+        normalized.content = `🎙️ **${member.displayName}:** ${rawTranscript || text}\n${normalized.content || ""}`;
         firstReply = false;
       }
       normalized.allowedMentions = { parse: [] };

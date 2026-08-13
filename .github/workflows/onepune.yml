@@ -39,6 +39,9 @@ jobs:
       - name: Run Onepune bot
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+          DEEPGRAM_MODEL: ${{ vars.DEEPGRAM_MODEL || 'nova-3' }}
+          DEEPGRAM_LANGUAGE: ${{ vars.DEEPGRAM_LANGUAGE || 'th' }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL || 'openrouter/free' }}
           OPENROUTER_STT_MODEL: ${{ vars.OPENROUTER_STT_MODEL || 'openai/whisper-large-v3' }}
