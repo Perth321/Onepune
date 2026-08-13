@@ -1,22 +1,22 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { Readable } from "node:stream";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import prism from "prism-media";
 import { parseDirectVoiceAction } from "../src/server-tools.js";
-import { createVoiceWakeTracker, extractVoiceCommand, pcmToWav } from "../src/voice.js";
+import {
+  createVoiceWakeTracker,
+  extractVoiceCommand,
+  pcmToWav,
+  transcriptionFailureMode,
+} from "../src/voice.js";
 
-test("uses the exact Guard greeting audio asset", async () => {
-  const path = fileURLToPath(new URL("../assets/greeting.mp3", import.meta.url));
-  const audio = await readFile(path);
-  assert.equal(audio.length, 109_533);
-  assert.equal(
-    createHash("sha256").update(audio).digest("hex"),
-    "9019527c5653ed2d673244683a1525de072a40a6013dd21ab3601e17eeae4c0f",
-  );
+test("stops retry spam for permanent STT credential and credit errors", () => {
+  assert.equal(transcriptionFailureMode(401), "disable-until-restart");
+  assert.equal(transcriptionFailureMode(402), "disable-until-restart");
+  assert.equal(transcriptionFailureMode(403), "disable-until-restart");
+  assert.equal(transcriptionFailureMode(429), "pause-five-minutes");
+  assert.equal(transcriptionFailureMode(503), "retry-next-utterance");
 });
 
 test("wraps resampled PCM audio in a valid mono 16 kHz WAV header", () => {

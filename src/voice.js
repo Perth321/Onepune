@@ -1,5 +1,4 @@
 import { Readable } from "node:stream";
-import { fileURLToPath } from "node:url";
 import {
   AudioPlayerStatus,
   EndBehaviorType,
@@ -27,7 +26,6 @@ const WATCHDOG_MS = 60_000;
 const WATCHDOG_COOLDOWN_MS = 3 * 60_000;
 const MAX_QUEUE = 32;
 const MAX_CONCURRENT_TRANSCRIPTIONS = 4;
-const GUARD_GREETING_PATH = fileURLToPath(new URL("../assets/greeting.mp3", import.meta.url));
 
 const WAKE_TOKEN_RE =
   /(?:วันเพื่อนๆ|วัน\s*เพื่อน|วันเพิ่อน|วันเพื้อน|วันเพือน|one\s*friend|wan\s*puean|wan\s*phuean)/iu;
@@ -86,6 +84,12 @@ export function createVoiceWakeTracker({ now = () => Date.now(), timeoutMs = WAK
       };
     },
   };
+}
+
+export function transcriptionFailureMode(status) {
+  if ([401, 402, 403].includes(status)) return "disable-until-restart";
+  if (status === 429) return "pause-five-minutes";
+  return "retry-next-utterance";
 }
 
 function downmixAndResample(pcm) {
@@ -150,14 +154,8 @@ function generateTone(segments, gain = 0.5) {
 }
 
 const JOIN_BEEP = generateTone([
-  { frequency: 0, ms: 200 },
-  { frequency: 880, ms: 280 },
-  { frequency: 0, ms: 120 },
-  { frequency: 660, ms: 320 },
-  { frequency: 0, ms: 100 },
-  { frequency: 1100, ms: 380 },
-  { frequency: 0, ms: 400 },
-]);
+  { frequency: 1250, ms: 140 },
+], 0.42);
 const WAKE_BEEP = generateTone([
   { frequency: 1400, ms: 110 },
   { frequency: 0, ms: 70 },
@@ -205,9 +203,10 @@ export function createVoiceController({ client, transcribe, onTranscript, enable
   const syncingGuilds = new Set();
   const errorNoticeAt = new Map();
   const transcriptionPausedUntil = new Map();
+  const transcriptionDisabledGuilds = new Set();
   const lastPacketAt = new Map();
   const lastWatchdogRejoin = new Map();
-  const announcedConnections = new WeakSet();
+  const greetedGuilds = new Set();
   const attachedReceivers = new WeakSet();
   const queue = [];
   let activeTranscriptions = 0;
@@ -235,36 +234,8 @@ export function createVoiceController({ client, transcribe, onTranscript, enable
     subscription.unsubscribe();
   }
 
-  async function playGuardGreeting(connection) {
-    if (!connection || connection.state.status === VoiceConnectionStatus.Destroyed) return false;
-    const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
-    const resource = createAudioResource(GUARD_GREETING_PATH, {
-      inputType: StreamType.Arbitrary,
-      silencePaddingFrames: 5,
-    });
-    const subscription = connection.subscribe(player);
-    if (!subscription) return false;
-    player.play(resource);
-    const played = await new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(false), 20_000);
-      timer.unref();
-      player.once(AudioPlayerStatus.Idle, () => {
-        clearTimeout(timer);
-        resolve(resource.playbackDuration >= 100);
-      });
-      player.once("error", (error) => {
-        console.error("Guard greeting failed:", error.message);
-        clearTimeout(timer);
-        resolve(false);
-      });
-    });
-    subscription.unsubscribe();
-    return played;
-  }
-
   async function notifyTranscriptionError(guild, voiceChannel, error) {
-    const previous = errorNoticeAt.get(guild.id) || 0;
-    if (![401, 402, 403, 429].includes(error.status) || Date.now() - previous < 5 * 60_000) return;
+    if (![401, 402, 403, 429].includes(error.status) || errorNoticeAt.has(guild.id)) return;
     errorNoticeAt.set(guild.id, Date.now());
     const channel = responseChannel(guild, voiceChannel);
     await channel?.send({
@@ -277,6 +248,7 @@ export function createVoiceController({ client, transcribe, onTranscript, enable
   }
 
   async function handleTranscript({ guild, voiceChannel, userId, pcm }) {
+    if (transcriptionDisabledGuilds.has(guild.id)) return;
     if ((transcriptionPausedUntil.get(guild.id) || 0) > Date.now()) return;
     const member = await guild.members.fetch(userId).catch(() => null);
     if (!member || member.user.bot) return;
@@ -285,7 +257,9 @@ export function createVoiceController({ client, transcribe, onTranscript, enable
       text = normalizeThaiSpacing(await transcribe(pcmToWav(downmixAndResample(pcm))));
     } catch (error) {
       console.error("Voice transcription failed:", error.message);
-      if ([401, 402, 403].includes(error.status)) {
+      const failureMode = transcriptionFailureMode(error.status);
+      if (failureMode === "disable-until-restart") transcriptionDisabledGuilds.add(guild.id);
+      if (failureMode === "pause-five-minutes") {
         transcriptionPausedUntil.set(guild.id, Date.now() + 5 * 60_000);
       }
       await notifyTranscriptionError(guild, voiceChannel, error);
@@ -333,6 +307,7 @@ export function createVoiceController({ client, transcribe, onTranscript, enable
   }
 
   function enqueue(job) {
+    if (transcriptionDisabledGuilds.has(job.guild.id)) return;
     if (queue.length >= MAX_QUEUE) {
       console.warn("Voice transcription queue full; dropping utterance from", job.userId);
       return;
@@ -450,17 +425,9 @@ export function createVoiceController({ client, transcribe, onTranscript, enable
       await entersState(connection, VoiceConnectionStatus.Ready, 60_000);
       attachReceiver(connection, guild, voiceChannel);
       lastPacketAt.set(guild.id, Date.now());
-      if (!announcedConnections.has(connection)) {
-        announcedConnections.add(connection);
-        const greeted = await playGuardGreeting(connection).catch(() => false);
-        if (!greeted) await playBeep(connection, JOIN_BEEP, "join beep");
-        await responseChannel(guild, voiceChannel)?.send({
-          content:
-            `🎙️ เข้าห้อง **${voiceChannel.name}** แล้ว พูด **วันเพื่อน** แล้วตามด้วยคำสั่ง ` +
-            "หรือพูด “วันเพื่อน” ก่อน แล้วพูดคำสั่งภายใน 15 วินาทีได้ " +
-            "(ช่วงเสียงจะถูกส่งไป OpenRouter เพื่อถอดเสียง)",
-          allowedMentions: { parse: [] },
-        }).catch(() => null);
+      if (!greetedGuilds.has(guild.id)) {
+        greetedGuilds.add(guild.id);
+        await playBeep(connection, JOIN_BEEP, "join beep");
       }
     } catch (error) {
       console.error("Could not join voice in " + guild.name + ":", error.message);
