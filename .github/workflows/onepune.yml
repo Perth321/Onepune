@@ -42,6 +42,8 @@ jobs:
           DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
           DEEPGRAM_MODEL: ${{ vars.DEEPGRAM_MODEL || 'nova-3' }}
           DEEPGRAM_LANGUAGE: ${{ vars.DEEPGRAM_LANGUAGE || 'th' }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_STT_MODEL: ${{ vars.GEMINI_STT_MODEL || 'gemini-2.5-flash' }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL || 'openrouter/free' }}
           OPENROUTER_FALLBACK_MODELS: ${{ vars.OPENROUTER_FALLBACK_MODELS || 'google/gemma-4-26b-a4b-it:free,openai/gpt-oss-20b:free,liquid/lfm-2.5-2.6b:free' }}
