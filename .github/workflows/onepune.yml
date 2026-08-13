@@ -11,7 +11,6 @@ concurrency:
 
 permissions:
   contents: write
-  actions: write
 
 jobs:
   bot:
@@ -19,19 +18,17 @@ jobs:
     # GitHub-hosted runners have a maximum job duration. Restart before that
     # limit so schedules are reloaded with only a short handoff window.
     timeout-minutes: 350
-    env:
-      DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-      GITHUB_TOKEN: ${{ github.token }}
-      GITHUB_REPOSITORY: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
       - name: Install dependencies
         run: |
           for attempt in 1 2 3; do
-            if npm install --no-audit --no-fund --registry=https://registry.npmjs.org; then
+            if npm ci --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org; then
               node --input-type=module -e "import('discord.js')" && exit 0
             fi
             echo "npm install failed on attempt ${attempt}; retrying..."
@@ -39,4 +36,12 @@ jobs:
             sleep 5
           done
           exit 1
-      - run: node src/index.js
+      - name: Run Onepune bot
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL || 'openrouter/free' }}
+          AUTO_TRANSLATE_ENABLED: ${{ vars.AUTO_TRANSLATE_ENABLED || 'true' }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node src/index.js

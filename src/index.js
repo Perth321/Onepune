@@ -13,14 +13,26 @@ import {
   TextInputBuilder,
   TextInputStyle,
 } from "discord.js";
+import {
+  createOpenRouterClient,
+  detectTranslationDirection,
+  isAssistantInvocation,
+  removeAssistantInvocation,
+} from "./ai.js";
 
 const token = process.env.DISCORD_BOT_TOKEN;
 const githubToken = process.env.GITHUB_TOKEN;
 const repository = process.env.GITHUB_REPOSITORY || "Perth321/Onepune";
 const schedulePath = "data/schedules.json";
+const autoTranslateEnabled = process.env.AUTO_TRANSLATE_ENABLED !== "false";
 const BANGKOK_OFFSET_MS = 7 * 60 * 60 * 1000;
 const schedules = [];
+const ai = createOpenRouterClient();
+const conversationHistory = new Map();
+const aiCooldowns = new Map();
 let saveQueue = Promise.resolve();
+const AI_COOLDOWN_MS = 5000;
+const MAX_HISTORY_MESSAGES = 8;
 const onepuneCommand = new SlashCommandBuilder()
   .setName("onepune")
   .setDescription("เปิดแผงควบคุมเช็กชื่อวันเพื่อน")
@@ -378,7 +390,78 @@ function chunks(text) {
 }
 
 async function sendChunks(channel, text) {
-  for (const part of chunks(text)) await channel.send(part);
+  for (const part of chunks(text)) {
+    await channel.send({ content: part, allowedMentions: { parse: [] } });
+  }
+}
+
+function aiConversationKey(message) {
+  return [message.guild.id, message.channel.id, message.author.id].join(":");
+}
+
+function isAiCoolingDown(userId) {
+  const now = Date.now();
+  const previous = aiCooldowns.get(userId) || 0;
+  if (now - previous < AI_COOLDOWN_MS) return true;
+  aiCooldowns.set(userId, now);
+  return false;
+}
+
+async function replyWithAi(message, task) {
+  if (!process.env.OPENROUTER_API_KEY) {
+    return message.reply({
+      content: "ระบบแปลและสนทนายังไม่ได้ตั้งค่า OPENROUTER_API_KEY ครับ",
+      allowedMentions: { repliedUser: false },
+    });
+  }
+  if (isAiCoolingDown(message.author.id)) return;
+
+  await message.channel.sendTyping().catch(() => null);
+  try {
+    const response = await task();
+    for (const part of chunks(response)) {
+      await message.reply({
+        content: part,
+        allowedMentions: { parse: [], repliedUser: false },
+      });
+    }
+  } catch (error) {
+    console.error("AI request failed:", error.message);
+    await message.reply({
+      content: "ตอนนี้ระบบแปล/สนทนาตอบไม่สำเร็จครับ ลองใหม่อีกครั้งในอีกสักครู่",
+      allowedMentions: { repliedUser: false },
+    });
+  }
+}
+
+async function handleAssistantChat(message) {
+  const key = aiConversationKey(message);
+  const history = conversationHistory.get(key) || [];
+  const prompt =
+    removeAssistantInvocation(message.content, client.user?.id) ||
+    "ทักทายฉันและถามว่ามีอะไรให้ช่วย";
+
+  await replyWithAi(message, async () => {
+    const response = await ai.chat(history, prompt);
+    conversationHistory.set(
+      key,
+      [...history, { role: "user", content: prompt }, { role: "assistant", content: response }].slice(
+        -MAX_HISTORY_MESSAGES,
+      ),
+    );
+    return response;
+  });
+}
+
+async function handleAutomaticTranslation(message) {
+  if (!autoTranslateEnabled) return;
+  if (message.content.trimStart().startsWith("/")) return;
+  if (message.content.length > 1800) return;
+  if (/^(https?:\/\/\S+|<a?:\w+:\d+>)$/u.test(message.content.trim())) return;
+
+  const direction = detectTranslationDirection(message.content);
+  if (!direction) return;
+  await replyWithAi(message, () => ai.translate(message.content, direction));
 }
 
 function memberName(member) {
@@ -413,25 +496,35 @@ async function onMessage(message) {
   if (!message.guild || message.author.bot || !client.user) return;
 
   const command = parseScheduleCommand(message);
-  if (!command) return;
-  if (command.error) return message.reply(command.error);
+  if (command) {
+    if (!message.member?.permissions.has(PermissionFlagsBits.ManageGuild)) {
+      return message.reply("คำสั่งตั้งนัดหมายต้องมีสิทธิ์ Manage Server ครับ");
+    }
+    if (command.error) return message.reply(command.error);
 
-  const target = nextTime(command.hour, command.minute);
-  schedules.splice(0, schedules.length, ...schedules.filter((item) => item.guildId !== message.guild.id));
-  schedules.push({
-    guildId: message.guild.id,
-    notifyChannelId: command.notifyChannel.id,
-    targetAt: target.toISOString(),
-  });
-  await saveSchedules();
+    const target = nextTime(command.hour, command.minute);
+    schedules.splice(0, schedules.length, ...schedules.filter((item) => item.guildId !== message.guild.id));
+    schedules.push({
+      guildId: message.guild.id,
+      notifyChannelId: command.notifyChannel.id,
+      targetAt: target.toISOString(),
+    });
+    await saveSchedules();
 
-  return message.reply(
-    "รับทราบครับ จะเช็กสมาชิกทั้งเซิร์ฟเวอร์เวลา **" +
-      thaiTime(target) +
-      "** และแจ้งผลที่ <#" +
-      command.notifyChannel.id +
-      ">",
-  );
+    return message.reply(
+      "รับทราบครับ จะเช็กสมาชิกทั้งเซิร์ฟเวอร์เวลา **" +
+        thaiTime(target) +
+        "** และแจ้งผลที่ <#" +
+        command.notifyChannel.id +
+        ">",
+    );
+  }
+
+  if (isAssistantInvocation(message.content, client.user.id)) {
+    return handleAssistantChat(message);
+  }
+
+  return handleAutomaticTranslation(message);
 }
 
 async function processSchedules() {
