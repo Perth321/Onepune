@@ -21,7 +21,12 @@ import {
   openRouterWebSearchTool,
   removeAssistantInvocation,
 } from "./ai.js";
-import { createServerToolExecutor, executeServerAction, serverTools } from "./server-tools.js";
+import {
+  createServerToolExecutor,
+  executeServerAction,
+  parseDirectVoiceAction,
+  serverTools,
+} from "./server-tools.js";
 import { createVoiceTranscriber } from "./stt.js";
 import { createVoiceController } from "./voice.js";
 
@@ -317,6 +322,21 @@ function confirmationSummary(action) {
   return "ทำรายการจัดการเซิร์ฟเวอร์";
 }
 
+function queuePendingAction(message, { name, args, permission, adminOnly = false }) {
+  const action = {
+    id: randomUUID().replaceAll("-", "").slice(0, 12),
+    name,
+    args,
+    permission,
+    adminOnly,
+    userId: message.author.id,
+    guildId: message.guild.id,
+    expiresAt: Date.now() + AGENT_ACTION_TTL_MS,
+  };
+  pendingAgentActions.set(action.id, action);
+  return action;
+}
+
 async function handleAgentConfirmation(interaction) {
   const [, decision, actionId] = interaction.customId.split(":");
   const action = pendingAgentActions.get(actionId);
@@ -537,21 +557,77 @@ async function handleAssistantChat(message) {
     removeAssistantInvocation(message.content, client.user?.id) ||
     "ทักทายฉันและถามว่ามีอะไรให้ช่วย";
 
+  const directVoiceAction = parseDirectVoiceAction(prompt);
+  if (directVoiceAction) {
+    const isOwnerOrAdmin =
+      message.guild.ownerId === message.author.id ||
+      message.member?.permissions.has(PermissionFlagsBits.Administrator);
+    if (!isOwnerOrAdmin) {
+      return message.reply({
+        content: "คำสั่งนี้ให้เจ้าของเซิร์ฟหรือ Administrator ใช้เท่านั้นนะ อย่าเพิ่งซน 😏",
+        allowedMentions: { repliedUser: false },
+      });
+    }
+
+    const targetText = directVoiceAction.targetText;
+    if (!targetText) {
+      return message.reply({
+        content: `${directVoiceAction.verb}${directVoiceAction.device}ใครล่ะพ่อคุณ ระบุชื่อหรือ mention มาด้วย 😂`,
+        allowedMentions: { repliedUser: false },
+      });
+    }
+
+    const mentionId = targetText.match(/^<@!?(\d{15,22})>$/u)?.[1];
+    let targetMember = mentionId
+      ? await message.guild.members.fetch(mentionId).catch(() => null)
+      : null;
+    if (!targetMember) {
+      await message.guild.members.fetch({ query: targetText.slice(0, 100), limit: 10 }).catch(() => null);
+      const lowered = targetText.toLocaleLowerCase();
+      const candidates = [...message.guild.members.cache.values()].filter((member) =>
+        [member.displayName, member.user.username, member.user.globalName]
+          .filter(Boolean)
+          .some((value) => value.toLocaleLowerCase().includes(lowered)),
+      );
+      if (candidates.length === 1) targetMember = candidates[0];
+      if (candidates.length > 1) {
+        return message.reply({
+          content:
+            "ชื่อนี้เจอหลายคน ขอ mention ให้ชัด ๆ หน่อย เดี๋ยวเปิดผิดคนแล้ววงแตก 😂\n" +
+            candidates.slice(0, 5).map((member) => `- ${member.displayName} (<@${member.id}>)`).join("\n"),
+          allowedMentions: { parse: [], repliedUser: false },
+        });
+      }
+    }
+    if (!targetMember) {
+      return message.reply({
+        content: `หา **${targetText.slice(0, 100)}** ไม่เจอ ลอง mention คนที่จะจัดการมาเลย`,
+        allowedMentions: { parse: [], repliedUser: false },
+      });
+    }
+
+    const action = queuePendingAction(message, {
+      name: directVoiceAction.name,
+      args: {
+        memberId: targetMember.id,
+        enabled: directVoiceAction.enabled,
+        reason: `สั่งโดย ${message.author.username}`,
+      },
+      permission: PermissionFlagsBits.Administrator,
+      adminOnly: true,
+    });
+    return message.reply({
+      content: "⚠️ **รอยืนยัน:** " + confirmationSummary(action) + "\nปุ่มจะหมดอายุใน 5 นาที",
+      components: [confirmationButtons(action)],
+      allowedMentions: { parse: [], repliedUser: false },
+    });
+  }
+
   await replyWithAi(message, async () => {
     let pendingAction = null;
     const queueAction = ({ name, args, permission, adminOnly = false }) => {
       if (pendingAction) throw new Error("Only one server change can be confirmed at a time");
-      const action = {
-        id: randomUUID().replaceAll("-", "").slice(0, 12),
-        name,
-        args,
-        permission,
-        adminOnly,
-        userId: message.author.id,
-        guildId: message.guild.id,
-        expiresAt: Date.now() + AGENT_ACTION_TTL_MS,
-      };
-      pendingAgentActions.set(action.id, action);
+      const action = queuePendingAction(message, { name, args, permission, adminOnly });
       pendingAction = action;
       return action;
     };
@@ -573,8 +649,16 @@ async function handleAssistantChat(message) {
         executeTool,
       });
     } catch (error) {
-      if (pendingAction) pendingAgentActions.delete(pendingAction.id);
-      throw error;
+      if (pendingAction) {
+        pendingAgentActions.delete(pendingAction.id);
+        pendingAction = null;
+      }
+      const canFallbackWithoutTools =
+        tools.length &&
+        ([400, 404, 502, 503].includes(error.status) || /tool|provider|empty response/iu.test(error.message));
+      if (!canFallbackWithoutTools) throw error;
+      console.warn("Agent tools unavailable; retrying chat without tools:", error.message);
+      response = await ai.chat(history, prompt);
     }
     conversationHistory.set(
       key,

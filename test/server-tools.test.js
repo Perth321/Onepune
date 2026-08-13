@@ -2,7 +2,25 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { PermissionFlagsBits } from "discord.js";
-import { createServerToolExecutor } from "../src/server-tools.js";
+import { createServerToolExecutor, parseDirectVoiceAction } from "../src/server-tools.js";
+
+test("parses direct voice controls without depending on the AI model", () => {
+  assert.deepEqual(parseDirectVoiceAction("เปิดไมค์"), {
+    name: "set_server_mute",
+    enabled: false,
+    targetText: "",
+    verb: "เปิด",
+    device: "ไมค์",
+  });
+  assert.deepEqual(parseDirectVoiceAction("ปิดหูฟังให้ Alex"), {
+    name: "set_server_deaf",
+    enabled: true,
+    targetText: "Alex",
+    verb: "ปิด",
+    device: "หูฟัง",
+  });
+  assert.equal(parseDirectVoiceAction("เซิร์ฟนี้มีกี่คน"), null);
+});
 
 function fakeMessage({ administrator = false, owner = false } = {}) {
   const authorId = "111111111111111";

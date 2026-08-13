@@ -56,6 +56,36 @@ export function extractVoiceCommand(text) {
     .trim();
 }
 
+export function createVoiceWakeTracker({ now = () => Date.now(), timeoutMs = WAKE_PENDING_MS } = {}) {
+  const pending = new Map();
+  return {
+    consume(userId, transcript) {
+      const pendingAt = pending.get(userId);
+      if (pendingAt && now() - pendingAt < timeoutMs) {
+        pending.delete(userId);
+        return {
+          matched: true,
+          followUp: true,
+          awaitingCommand: false,
+          command: extractVoiceCommand(transcript) ?? normalizeThaiSpacing(transcript),
+        };
+      }
+      pending.delete(userId);
+      const command = extractVoiceCommand(transcript);
+      if (command === null) {
+        return { matched: false, followUp: false, awaitingCommand: false, command: null };
+      }
+      if (!command) pending.set(userId, now());
+      return {
+        matched: true,
+        followUp: false,
+        awaitingCommand: !command,
+        command,
+      };
+    },
+  };
+}
+
 function downmixAndResample(pcm) {
   const inputFrames = Math.floor(pcm.length / 4);
   const ratio = INPUT_SAMPLE_RATE / OUTPUT_SAMPLE_RATE;
@@ -164,7 +194,7 @@ function responseChannel(guild, voiceChannel) {
 export function createVoiceController({ client, transcribe, onTranscript, enabled = true }) {
   const subscriptions = new Map();
   const audioBuffers = new Map();
-  const pendingWake = new Map();
+  const wakeTracker = createVoiceWakeTracker();
   const busyGuilds = new Set();
   const syncingGuilds = new Set();
   const errorNoticeAt = new Map();
@@ -225,27 +255,12 @@ export function createVoiceController({ client, transcribe, onTranscript, enable
     }
     if (!text) return;
 
-    const pending = pendingWake.get(userId);
-    let command = null;
-    let followUp = false;
-    if (pending && Date.now() - pending < WAKE_PENDING_MS) {
-      pendingWake.delete(userId);
-      followUp = true;
-      command = extractVoiceCommand(text) ?? text;
-    } else {
-      pendingWake.delete(userId);
-      command = extractVoiceCommand(text);
-    }
-    if (command === null) return;
+    const wake = wakeTracker.consume(userId, text);
+    if (!wake.matched) return;
 
     const connection = getVoiceConnection(guild.id);
-    if (!followUp) await playBeep(connection, WAKE_BEEP, "wake beep");
-    if (!command) {
-      pendingWake.set(userId, Date.now());
-      const timer = setTimeout(() => pendingWake.delete(userId), WAKE_PENDING_MS);
-      timer.unref();
-      return;
-    }
+    if (!wake.followUp) await playBeep(connection, WAKE_BEEP, "wake beep");
+    if (wake.awaitingCommand) return;
     if (busyGuilds.has(guild.id)) return;
 
     const textChannel = responseChannel(guild, voiceChannel);
@@ -255,7 +270,7 @@ export function createVoiceController({ client, transcribe, onTranscript, enable
       await onTranscript({
         guild,
         member,
-        text: "วันเพื่อน " + command,
+        text: "วันเพื่อน " + wake.command,
         rawTranscript: text,
         textChannel,
         voiceChannel,

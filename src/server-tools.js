@@ -98,6 +98,18 @@ const mutationPermissions = {
 
 const adminOnlyMutations = new Set(["set_server_mute", "set_server_deaf"]);
 
+export function parseDirectVoiceAction(prompt) {
+  const match = String(prompt || "").trim().match(/^(เปิด|ปิด)\s*(ไมค์|หูฟัง|เสียงที่ได้ยิน)\s*(.*)$/u);
+  if (!match) return null;
+  return {
+    name: match[2] === "ไมค์" ? "set_server_mute" : "set_server_deaf",
+    enabled: match[1] === "ปิด",
+    targetText: match[3].replace(/^(?:ให้|ของ|คน|สมาชิก)\s*/u, "").trim(),
+    verb: match[1],
+    device: match[2],
+  };
+}
+
 function cleanName(value) {
   return String(value || "").trim().slice(0, 100);
 }

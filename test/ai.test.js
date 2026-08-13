@@ -2,12 +2,21 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  cleanAssistantReply,
   createOpenRouterClient,
   detectTranslationDirection,
   isAssistantInvocation,
   openRouterWebSearchTool,
   removeAssistantInvocation,
 } from "../src/ai.js";
+
+test("cleans filler and leaked style instructions from chat replies", () => {
+  assert.equal(
+    cleanAssistantReply("อืม... ลีลี่ไปทำอะไรมาอีกล่ะ 555 antiated: แค่ humorous? ชัดเจน!"),
+    "ลีลี่ไปทำอะไรมาอีกล่ะ 555",
+  );
+  assert.equal(cleanAssistantReply("<reply>เอ้า เล่ามาก่อนดิ 555</reply>"), "เอ้า เล่ามาก่อนดิ 555");
+});
 
 test("detects Thai and English translation directions", () => {
   assert.equal(detectTranslationDirection("สวัสดี วันนี้เป็นอย่างไร"), "th-to-en");
